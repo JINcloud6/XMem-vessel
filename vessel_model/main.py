@@ -13,6 +13,8 @@ if parent_dir not in sys.path:
 
 
 import time
+import math
+import heapq
 import numpy as np
 import torch
 import h5py
@@ -29,11 +31,73 @@ from .data_manager import VolumeManager
 try:
     from model.network import XMem
     from inference.inference_core import InferenceCore
-    from inference.kv_memory_store import KeyValueMemoryStore
     from segment_anything import sam_model_registry, SamPredictor
 except ImportError as e:
     print("Error importing model/inference modules. Make sure the script is running with access to the parent directory.")
     raise e
+
+def _get_covered_slice(covered_mask, axis, box):
+    idx, d1_min, d1_max, d2_min, d2_max = box
+    if axis == 0:
+        return covered_mask[idx, d1_min:d1_max, d2_min:d2_max]
+    if axis == 1:
+        return covered_mask[d1_min:d1_max, idx, d2_min:d2_max]
+    return covered_mask[d1_min:d1_max, d2_min:d2_max, idx]
+
+def _update_covered_mask(covered_mask, local_mask, axis, box):
+    idx, d1_min, d1_max, d2_min, d2_max = box
+    local_mask = local_mask[:(d1_max-d1_min), :(d2_max-d2_min)]
+    if axis == 0:
+        covered_mask[idx, d1_min:d1_max, d2_min:d2_max] |= local_mask
+    elif axis == 1:
+        covered_mask[d1_min:d1_max, idx, d2_min:d2_max] |= local_mask
+    else:
+        covered_mask[d1_min:d1_max, d2_min:d2_max, idx] |= local_mask
+
+def _compute_seed_init(seed, vol_man, sam_predictor):
+    crops = vol_man.get_triplane_crops(seed)
+    best_axis = -1
+    best_mask = None
+    best_score = None
+    best_box = None
+    min_area = float('inf')
+
+    for axis in [0, 1, 2]:
+        img, box = crops[axis]
+        if axis == 0:
+            local_pt = [seed[2] - box[3], seed[1] - box[1]]
+        elif axis == 1:
+            local_pt = [seed[2] - box[3], seed[0] - box[1]]
+        else:
+            local_pt = [seed[1] - box[3], seed[0] - box[1]]
+
+        sam_predictor.set_image(img)
+        masks, scores, _ = sam_predictor.predict(
+            point_coords=np.array([local_pt]),
+            point_labels=np.array([1]),
+            multimask_output=True
+        )
+
+        mask, score = select_masks(masks, scores, thr=0.9, crit='max', max_size=5000, min_circularity=0.6)
+        if mask is None:
+            continue
+        area = mask.sum()
+        if area < min_area:
+            min_area = area
+            best_axis = axis
+            best_mask = mask.astype(np.uint8)
+            best_score = float(score) if score is not None else None
+            best_box = box
+
+    return best_axis, best_mask, best_score, best_box
+
+def _compute_priority(mask, conf, radius, max_radius, covered_slice):
+    area = mask.sum()
+    gain = (mask.astype(bool) & ~covered_slice.astype(bool)).sum() / (area + 1e-6)
+    norm_radius = radius / max_radius if max_radius > 0 else 0.0
+    conf_val = conf if conf is not None else 1.0
+    priority = 0.5 * gain + 0.3 * norm_radius + 0.2 * conf_val
+    return priority, gain, norm_radius
 
 def run_segmentation():
     args = get_args()
@@ -92,6 +156,42 @@ def run_segmentation():
 
     # 5. Iterative Segmentation Loop
     print(f"Starting segmentation with {len(seeds)} seeds...")
+
+    covered_mask = np.zeros_like(vol_man.global_mask, dtype=bool)
+    seed_records = []
+    radii = []
+    for seed in tqdm(seeds, desc="Init Seeds"):
+        best_axis, best_mask, best_score, best_box = _compute_seed_init(seed, vol_man, sam_predictor)
+        if best_axis == -1 or best_mask is None:
+            continue
+        area = best_mask.sum()
+        radius = math.sqrt(area / math.pi) if area > 0 else 0.0
+        seed_records.append({
+            "seed": seed,
+            "axis": best_axis,
+            "mask": best_mask,
+            "score": best_score,
+            "box": best_box,
+            "radius": radius,
+        })
+        radii.append(radius)
+
+    if not seed_records:
+        print("No valid seeds after SAM init.")
+        return
+
+    max_radius = max(radii) if radii else 0.0
+    priority_queue = []
+    for idx, record in enumerate(seed_records):
+        covered_slice = _get_covered_slice(covered_mask, record["axis"], record["box"])
+        priority, gain, _ = _compute_priority(
+            record["mask"],
+            record["score"],
+            record["radius"],
+            max_radius,
+            covered_slice,
+        )
+        heapq.heappush(priority_queue, (-priority, idx, record, gain))
     
     processed_count = 0
     useonevos = args.useonevos
@@ -101,47 +201,41 @@ def run_segmentation():
         processor.set_all_labels([1])
     else:
         print('use different vos')
-    global_mem = KeyValueMemoryStore(count_usage=False)
-    for seed in tqdm(seeds, desc="Tracking"):
-        z, y, x = seed
-        
-        # --- Check overlap (Critical for efficiency) ---
-        if vol_man.global_mask[z, y, x] > 0:
+    progress = tqdm(total=len(priority_queue), desc="Tracking")
+    while priority_queue:
+        stored_priority, _, record, _ = heapq.heappop(priority_queue)
+        seed = record["seed"]
+        best_axis = record["axis"]
+        best_mask = record["mask"]
+        best_score = record["score"]
+        best_box = record["box"]
+        radius = record["radius"]
+
+        covered_slice = _get_covered_slice(covered_mask, best_axis, best_box)
+        priority, gain, _ = _compute_priority(
+            best_mask,
+            best_score,
+            radius,
+            max_radius,
+            covered_slice,
+        )
+        if priority < (-stored_priority - 1e-6):
+            heapq.heappush(priority_queue, (-priority, time.time(), record, gain))
             continue
-        
+
+        print(f"Pop seed {seed} | priority={priority:.4f}, gain={gain:.4f}, radius={radius:.2f}")
+
+        z, y, x = seed
+        if vol_man.global_mask[z, y, x] > 0:
+            progress.update(1)
+            continue
+
+        if gain < 1e-3:
+            progress.update(1)
+            continue
+
         vol_man.global_mask[z, y, x] = 0 # Temporarily clear seed point
         
-        # --- A. Tri-plane SAM Initialization ---
-        crops = vol_man.get_triplane_crops(seed)
-        best_axis = -1
-        best_mask = None
-        min_area = float('inf')
-
-        for axis in [0, 1, 2]:
-            img, box = crops[axis]
-            # Map seed to local crop coords
-            if axis == 0: local_pt = [seed[2]-box[3], seed[1]-box[1]] 
-            elif axis == 1: local_pt = [seed[2]-box[3], seed[0]-box[1]]
-            else: local_pt = [seed[1]-box[3], seed[0]-box[1]]
-            
-            sam_predictor.set_image(img)
-            masks, scores, _ = sam_predictor.predict(
-                point_coords=np.array([local_pt]), 
-                point_labels=np.array([1]), 
-                multimask_output=True
-            )
-            
-            mask, score = select_masks(masks, scores, thr=0.9, crit='max', max_size=5000,min_circularity=0.6)
-            
-            if mask is not None:
-                area = mask.sum()
-                if area < min_area:
-                    min_area = area
-                    best_axis = axis
-                    best_mask = mask.astype(np.uint8)
-        
-        if best_axis == -1: continue
-
         # --- B. XMem Propagation ---
         track_dim = [0, 1, 2][best_axis]
         start_idx = seed[track_dim]
@@ -154,7 +248,7 @@ def run_segmentation():
         if not useonevos:
             processor = InferenceCore(xmem, config=xmem_config)
             processor.set_all_labels([1])
-        _, box = crops[best_axis] 
+        box = best_box
         
         for seq in sequences:
             if not seq: continue
@@ -182,12 +276,37 @@ def run_segmentation():
                 
                 if pred.sum() > 0:
                     vol_man.update_global_mask(pred, best_axis, (curr_idx, *box[1:]))
+                    _update_covered_mask(covered_mask, pred.astype(bool), best_axis, (curr_idx, *box[1:]))
                 else:
                     break
 
         processed_count += 1
         if not useonevos:
             del processor
+        progress.update(1)
+
+        new_seeds = []
+        for new_seed in new_seeds:
+            best_axis, best_mask, best_score, best_box = _compute_seed_init(new_seed, vol_man, sam_predictor)
+            if best_axis == -1 or best_mask is None:
+                continue
+            area = best_mask.sum()
+            radius = math.sqrt(area / math.pi) if area > 0 else 0.0
+            max_radius = max(max_radius, radius)
+            record = {
+                "seed": new_seed,
+                "axis": best_axis,
+                "mask": best_mask,
+                "score": best_score,
+                "box": best_box,
+                "radius": radius,
+            }
+            covered_slice = _get_covered_slice(covered_mask, best_axis, best_box)
+            priority, gain, _ = _compute_priority(best_mask, best_score, radius, max_radius, covered_slice)
+            heapq.heappush(priority_queue, (-priority, time.time(), record, gain))
+            progress.total += 1
+            progress.refresh()
+    progress.close()
 
     print('Cleanup...')
     vol_man.clean_up() # 可选，根据需要取消注释
