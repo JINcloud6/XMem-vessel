@@ -76,8 +76,10 @@ class MemoryManager:
             long_mem_size = self.long_mem.size
             memory_key = torch.cat([self.long_mem.key, self.work_mem.key], -1)
             shrinkage = torch.cat([self.long_mem.shrinkage, self.work_mem.shrinkage], -1) 
-            if self.long_mem.pos is not None and self.work_mem.pos is not None:
-                memory_pos = torch.cat([self.long_mem.pos, self.work_mem.pos], -1)
+            long_pos = self.long_mem.expanded_pos(device=query_key.device, dtype=query_key.dtype)
+            work_pos = self.work_mem.expanded_pos(device=query_key.device, dtype=query_key.dtype)
+            if long_pos is not None and work_pos is not None:
+                memory_pos = torch.cat([long_pos, work_pos], -1)
             else:
                 memory_pos = None
 
@@ -136,7 +138,7 @@ class MemoryManager:
                 self.long_mem.update_usage(long_usage.flatten())
         else:
             # No long-term memory
-            memory_pos = self.work_mem.pos
+            memory_pos = self.work_mem.expanded_pos(device=query_key.device, dtype=query_key.dtype)
             similarity = get_similarity(
                 self.work_mem.key,
                 self.work_mem.shrinkage,
@@ -195,11 +197,9 @@ class MemoryManager:
         shrinkage = shrinkage.flatten(start_dim=2) 
         value = value[0].flatten(start_dim=2)
         if mem_pos is not None:
-            mem_pos = torch.as_tensor(mem_pos, device=key.device, dtype=key.dtype).flatten()
-            if mem_pos.numel() == 1:
-                mem_pos = mem_pos.repeat(key.shape[-1])
-            if mem_pos.numel() != key.shape[-1]:
-                raise ValueError('mem_pos length must match the flattened memory size')
+            mem_pos = torch.as_tensor(mem_pos, device='cpu', dtype=key.dtype).flatten()
+            if mem_pos.numel() != 1:
+                raise ValueError('mem_pos must be a scalar for per-frame storage')
             mem_pos = mem_pos.view(1, 1, -1)
 
         self.CK = key.shape[1]
@@ -210,7 +210,15 @@ class MemoryManager:
                 warnings.warn('the selection factor is only needed in long-term mode', UserWarning)
             selection = selection.flatten(start_dim=2)
 
-        self.work_mem.add(key, value, shrinkage, selection, objects, mem_pos=mem_pos)
+        self.work_mem.add(
+            key,
+            value,
+            shrinkage,
+            selection,
+            objects,
+            mem_pos=mem_pos,
+            mem_pos_stride=self.HW,
+        )
 
         # long-term memory cleanup
         if self.enable_long_term:
@@ -279,9 +287,19 @@ class MemoryManager:
             selection=None,
             objects=None,
             mem_pos=prototype_pos,
+            mem_pos_stride=1,
         )
 
-    def consolidation(self, candidate_key, candidate_shrinkage, candidate_selection, usage, candidate_pos, candidate_value):
+    def consolidation(
+        self,
+        candidate_key,
+        candidate_shrinkage,
+        candidate_selection,
+        usage,
+        candidate_pos,
+        candidate_pos_stride,
+        candidate_value,
+    ):
         # keys: 1*C*N
         # values: num_objects*C*N
         N = candidate_key.shape[-1]
@@ -295,7 +313,14 @@ class MemoryManager:
 
         prototype_key = candidate_key[:, :, prototype_indices]
         prototype_selection = candidate_selection[:, :, prototype_indices] if candidate_selection is not None else None
-        prototype_pos = candidate_pos[:, :, prototype_indices] if candidate_pos is not None else None
+        if candidate_pos is not None:
+            if candidate_pos_stride > 1:
+                frame_indices = prototype_indices // candidate_pos_stride
+                prototype_pos = candidate_pos[:, :, frame_indices]
+            else:
+                prototype_pos = candidate_pos[:, :, prototype_indices]
+        else:
+            prototype_pos = None
 
         """
         Potentiation step
