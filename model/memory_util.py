@@ -4,25 +4,59 @@ import torch
 from typing import Optional
 
 
-def _spatial_decay_bias(mem_pos, query_pos, sigma, lambda_pos, eps, device, dtype, length):
+def _spatial_decay_bias(mem_pos, query_pos, sigma, lambda_pos, eps, device, dtype):
     if mem_pos is None or query_pos is None or lambda_pos == 0:
         return None
 
     mem_pos = torch.as_tensor(mem_pos, device=device, dtype=dtype).flatten()
     query_pos = torch.as_tensor(query_pos, device=device, dtype=dtype)
 
-    if mem_pos.numel() != length:
-        raise ValueError(f'mem_pos length {mem_pos.numel()} does not match memory length {length}')
-
     sigma_t = torch.as_tensor(sigma, device=device, dtype=dtype)
     sigma_t = torch.clamp(sigma_t, min=eps)
     alpha = torch.exp(-torch.abs(mem_pos - query_pos) / sigma_t)
     bias = lambda_pos * torch.log(alpha + eps)
 
-    return bias.view(1, -1, 1)
+    return bias
 
 
-def get_similarity(mk, ms, qk, qe, mem_pos=None, query_pos=None, sigma=8.0, lambda_pos=1.0, eps=1e-6):
+def add_spatial_bias(similarity, mem_pos, query_pos, sigma=8.0, lambda_pos=1.0, eps=1e-6, mem_pos_stride=1):
+    if mem_pos is None or query_pos is None or lambda_pos == 0:
+        return similarity
+
+    if mem_pos_stride < 1:
+        raise ValueError('mem_pos_stride must be >= 1')
+
+    bias = _spatial_decay_bias(
+        mem_pos,
+        query_pos,
+        sigma,
+        lambda_pos,
+        eps,
+        similarity.device,
+        similarity.dtype,
+    )
+    if bias is None:
+        return similarity
+
+    if mem_pos_stride == 1:
+        if bias.numel() != similarity.shape[1]:
+            raise ValueError('mem_pos length must match memory length')
+        similarity = similarity + bias.view(1, -1, 1)
+        return similarity
+
+    if similarity.shape[1] % mem_pos_stride != 0:
+        raise ValueError('memory length must be divisible by mem_pos_stride')
+    num_frames = similarity.shape[1] // mem_pos_stride
+    if bias.numel() != num_frames:
+        raise ValueError('mem_pos length must match number of frames')
+
+    similarity = similarity.view(similarity.shape[0], num_frames, mem_pos_stride, similarity.shape[2])
+    similarity = similarity + bias.view(1, -1, 1, 1)
+    similarity = similarity.view(similarity.shape[0], num_frames * mem_pos_stride, similarity.shape[3])
+    return similarity
+
+
+def get_similarity(mk, ms, qk, qe, mem_pos=None, query_pos=None, sigma=8.0, lambda_pos=1.0, eps=1e-6, mem_pos_stride=1):
     # used for training/inference and memory reading/memory potentiation
     # mk: B x CK x [N]    - Memory keys
     # ms: B x  1 x [N]    - Memory shrinkage
@@ -54,18 +88,15 @@ def get_similarity(mk, ms, qk, qe, mem_pos=None, query_pos=None, sigma=8.0, lamb
     else:
         similarity = similarity / math.sqrt(CK)   # B*N*HW
 
-    bias = _spatial_decay_bias(
+    similarity = add_spatial_bias(
+        similarity,
         mem_pos,
         query_pos,
-        sigma,
-        lambda_pos,
-        eps,
-        similarity.device,
-        similarity.dtype,
-        similarity.shape[1],
+        sigma=sigma,
+        lambda_pos=lambda_pos,
+        eps=eps,
+        mem_pos_stride=mem_pos_stride,
     )
-    if bias is not None:
-        similarity = similarity + bias
 
     return similarity
 
@@ -95,7 +126,18 @@ def do_softmax(similarity, top_k: Optional[int]=None, inplace=False, return_usag
 
     return affinity
 
-def get_affinity(mk, ms, qk, qe, mem_pos=None, query_pos=None, sigma=8.0, lambda_pos=1.0, eps=1e-6):
+def get_affinity(
+    mk,
+    ms,
+    qk,
+    qe,
+    mem_pos=None,
+    query_pos=None,
+    sigma=8.0,
+    lambda_pos=1.0,
+    eps=1e-6,
+    mem_pos_stride=1,
+):
     # shorthand used in training with no top-k
     similarity = get_similarity(
         mk,
@@ -107,6 +149,7 @@ def get_affinity(mk, ms, qk, qe, mem_pos=None, query_pos=None, sigma=8.0, lambda
         sigma=sigma,
         lambda_pos=lambda_pos,
         eps=eps,
+        mem_pos_stride=mem_pos_stride,
     )
     affinity = do_softmax(similarity)
     return affinity

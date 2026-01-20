@@ -76,23 +76,27 @@ class MemoryManager:
             long_mem_size = self.long_mem.size
             memory_key = torch.cat([self.long_mem.key, self.work_mem.key], -1)
             shrinkage = torch.cat([self.long_mem.shrinkage, self.work_mem.shrinkage], -1) 
-            long_pos = self.long_mem.expanded_pos(device=query_key.device, dtype=query_key.dtype)
-            work_pos = self.work_mem.expanded_pos(device=query_key.device, dtype=query_key.dtype)
-            if long_pos is not None and work_pos is not None:
-                memory_pos = torch.cat([long_pos, work_pos], -1)
-            else:
-                memory_pos = None
 
-            similarity = get_similarity(
-                memory_key,
-                shrinkage,
-                query_key,
-                selection,
-                mem_pos=memory_pos.view(-1) if memory_pos is not None else None,
-                query_pos=query_pos,
-                sigma=self.spatial_decay_sigma,
-                lambda_pos=self.spatial_decay_lambda,
-            )
+            similarity = get_similarity(memory_key, shrinkage, query_key, selection)
+            if query_pos is not None and self.spatial_decay_lambda != 0:
+                if self.long_mem.pos is not None:
+                    similarity[:, :long_mem_size] = add_spatial_bias(
+                        similarity[:, :long_mem_size],
+                        self.long_mem.pos,
+                        query_pos,
+                        sigma=self.spatial_decay_sigma,
+                        lambda_pos=self.spatial_decay_lambda,
+                        mem_pos_stride=self.long_mem.pos_stride,
+                    )
+                if self.work_mem.pos is not None:
+                    similarity[:, long_mem_size:] = add_spatial_bias(
+                        similarity[:, long_mem_size:],
+                        self.work_mem.pos,
+                        query_pos,
+                        sigma=self.spatial_decay_sigma,
+                        lambda_pos=self.spatial_decay_lambda,
+                        mem_pos_stride=self.work_mem.pos_stride,
+                    )
             work_mem_similarity = similarity[:, long_mem_size:]
             long_mem_similarity = similarity[:, :long_mem_size]
 
@@ -138,16 +142,19 @@ class MemoryManager:
                 self.long_mem.update_usage(long_usage.flatten())
         else:
             # No long-term memory
-            memory_pos = self.work_mem.expanded_pos(device=query_key.device, dtype=query_key.dtype)
             similarity = get_similarity(
                 self.work_mem.key,
                 self.work_mem.shrinkage,
                 query_key,
                 selection,
-                mem_pos=memory_pos.view(-1) if memory_pos is not None else None,
-                query_pos=query_pos,
+            )
+            similarity = add_spatial_bias(
+                similarity,
+                self.work_mem.pos,
+                query_pos,
                 sigma=self.spatial_decay_sigma,
                 lambda_pos=self.spatial_decay_lambda,
+                mem_pos_stride=self.work_mem.pos_stride,
             )
 
             if self.enable_long_term:
