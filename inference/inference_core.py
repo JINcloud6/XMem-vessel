@@ -39,7 +39,7 @@ class InferenceCore:
         # self.all_labels = [l.item() for l in all_labels]
         self.all_labels = all_labels
 
-    def step(self, image, mask=None, valid_labels=None, end=False):
+    def step(self, image, mask=None, valid_labels=None, end=False, query_pos=None):
         # image: 3*H*W
         # mask: num_objects*H*W or None
         self.curr_ti += 1
@@ -61,7 +61,7 @@ class InferenceCore:
 
         # segment the current frame is needed
         if need_segment:
-            memory_readout = self.memory.match_memory(key, selection).unsqueeze(0)
+            memory_readout = self.memory.match_memory(key, selection, query_pos=query_pos).unsqueeze(0)
             hidden, _, pred_prob_with_bg = self.network.segment(multi_scale_features, memory_readout, 
                                     self.memory.get_hidden(), h_out=is_normal_update, strip_bg=False)
             # remove batch dim
@@ -97,7 +97,8 @@ class InferenceCore:
             value, hidden = self.network.encode_value(image, f16, self.memory.get_hidden(), 
                                     pred_prob_with_bg[1:].unsqueeze(0), is_deep_update=is_deep_update)
             self.memory.add_memory(key, shrinkage, value, self.all_labels, 
-                                    selection=selection if self.enable_long_term else None)
+                                    selection=selection if self.enable_long_term else None,
+                                    mem_pos=query_pos)
             self.last_mem_ti = self.curr_ti
 
             if is_deep_update:

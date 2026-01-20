@@ -69,6 +69,8 @@ if __name__ == '__main__':
     parser.add_argument('--top_k', type=int, default=30)
     parser.add_argument('--mem_every', type=int, default=10)
     parser.add_argument('--deep_update_every', help='Leave -1 normally to synchronize with mem_every', type=int, default=-1)
+    parser.add_argument('--spatial_decay_sigma', type=float, default=8.0)
+    parser.add_argument('--spatial_decay_lambda', type=float, default=1.0)
     parser.add_argument('--no_amp', help='Turn off AMP', action='store_true')
     parser.add_argument('--size', default=480, type=int, 
             help='Resize the shorter side to this size. -1 to use original resolution. ')
