@@ -61,7 +61,7 @@ class InferenceCore:
 
         # segment the current frame is needed
         if need_segment:
-            memory_readout = self.memory.match_memory(key, selection).unsqueeze(0)
+            memory_readout = self.memory.match_memory(key, selection, curr_ti=self.curr_ti).unsqueeze(0)
             hidden, _, pred_prob_with_bg = self.network.segment(multi_scale_features, memory_readout, 
                                     self.memory.get_hidden(), h_out=is_normal_update, strip_bg=False)
             # remove batch dim
@@ -96,8 +96,14 @@ class InferenceCore:
         if is_mem_frame:
             value, hidden = self.network.encode_value(image, f16, self.memory.get_hidden(), 
                                     pred_prob_with_bg[1:].unsqueeze(0), is_deep_update=is_deep_update)
-            self.memory.add_memory(key, shrinkage, value, self.all_labels, 
-                                    selection=selection if self.enable_long_term else None)
+            self.memory.add_memory(
+                key,
+                shrinkage,
+                value,
+                self.all_labels,
+                selection=selection if self.enable_long_term else None,
+                curr_ti=self.curr_ti,
+            )
             self.last_mem_ti = self.curr_ti
 
             if is_deep_update:

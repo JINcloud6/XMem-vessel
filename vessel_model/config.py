@@ -37,4 +37,5 @@ xmem_config = {
     'mem_every': 5,
     'deep_update_every': -1,
     'save_scores': False,
+    'temporal_decay': 5.0,
 }
