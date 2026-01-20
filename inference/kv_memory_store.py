@@ -28,20 +28,24 @@ class KeyValueMemoryStore:
 
         # shrinkage and selection are also single tensors
         self.s = self.e = None
+        self.p = None
 
         # usage
         if self.count_usage:
             self.use_count = self.life_count = None
 
-    def add(self, key, value, shrinkage, selection, objects: List[int]):
+    def add(self, key, value, shrinkage, selection, objects: List[int], mem_pos=None):
         new_count = torch.zeros((key.shape[0], 1, key.shape[2]), device=key.device, dtype=torch.float32)
         new_life = torch.zeros((key.shape[0], 1, key.shape[2]), device=key.device, dtype=torch.float32) + 1e-7
+        if mem_pos is not None:
+            mem_pos = mem_pos.to(device=key.device)
 
         # add the key
         if self.k is None:
             self.k = key
             self.s = shrinkage
             self.e = selection
+            self.p = mem_pos
             if self.count_usage:
                 self.use_count = new_count
                 self.life_count = new_life
@@ -51,6 +55,12 @@ class KeyValueMemoryStore:
                 self.s = torch.cat([self.s, shrinkage], -1)
             if selection is not None:
                 self.e = torch.cat([self.e, selection], -1)
+            if mem_pos is not None:
+                if self.p is None:
+                    raise ValueError('mem_pos provided for new entries but missing in existing memory')
+                self.p = torch.cat([self.p, mem_pos], -1)
+            elif self.p is not None:
+                raise ValueError('mem_pos missing for new entries but existing memory has positions')
             if self.count_usage:
                 self.use_count = torch.cat([self.use_count, new_count], -1)
                 self.life_count = torch.cat([self.life_count, new_life], -1)
@@ -114,6 +124,8 @@ class KeyValueMemoryStore:
                 self.s = self.s[:,:,:start]
             if self.e is not None:
                 self.e = self.e[:,:,:start]
+            if self.p is not None:
+                self.p = self.p[:,:,:start]
             
             for gi in range(self.num_groups):
                 if self.v[gi].shape[-1] >= min_size:
@@ -127,6 +139,8 @@ class KeyValueMemoryStore:
                 self.s = torch.cat([self.s[:,:,:start], self.s[:,:,end:]], -1)
             if self.e is not None:
                 self.e = torch.cat([self.e[:,:,:start], self.e[:,:,end:]], -1)
+            if self.p is not None:
+                self.p = torch.cat([self.p[:,:,:start], self.p[:,:,end:]], -1)
             
             for gi in range(self.num_groups):
                 if self.v[gi].shape[-1] >= min_size:
@@ -143,6 +157,7 @@ class KeyValueMemoryStore:
         self.s = self.s[:, :, survived] if self.s is not None else None
         # Long-term memory does not store ek so this should not be needed
         self.e = self.e[:, :, survived] if self.e is not None else None
+        self.p = self.p[:, :, survived] if self.p is not None else None
         if self.num_groups > 1:
             raise NotImplementedError("""The current data structure does not support feature removal with 
             multiple object groups (e.g., some objects start to appear later in the video)
@@ -164,7 +179,7 @@ class KeyValueMemoryStore:
             return usage
 
     def get_all_sliced(self, start: int, end: int):
-        # return k, sk, ek, usage in order, sliced by start and end
+        # return k, sk, ek, usage, pos in order, sliced by start and end
 
         if end == 0:
             # negative 0 would not work as the end index!
@@ -172,13 +187,15 @@ class KeyValueMemoryStore:
             sk = self.s[:,:,start:] if self.s is not None else None
             ek = self.e[:,:,start:] if self.e is not None else None
             usage = self.get_usage()[:,:,start:]
+            pos = self.p[:,:,start:] if self.p is not None else None
         else:
             k = self.k[:,:,start:end]
             sk = self.s[:,:,start:end] if self.s is not None else None
             ek = self.e[:,:,start:end] if self.e is not None else None
             usage = self.get_usage()[:,:,start:end]
+            pos = self.p[:,:,start:end] if self.p is not None else None
 
-        return k, sk, ek, usage
+        return k, sk, ek, usage, pos
 
     def get_v_size(self, ni: int):
         return self.v[ni].shape[2]
@@ -213,3 +230,6 @@ class KeyValueMemoryStore:
     def selection(self):
         return self.e
 
+    @property
+    def pos(self):
+        return self.p

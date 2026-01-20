@@ -87,7 +87,8 @@ class XMem(nn.Module):
     # Used in training only. 
     # This step is replaced by MemoryManager in test time
     def read_memory(self, query_key, query_selection, memory_key, 
-                    memory_shrinkage, memory_value):
+                    memory_shrinkage, memory_value, mem_pos=None, query_pos=None,
+                    spatial_sigma=8.0, spatial_lambda=1.0):
         """
         query_key       : B * CK * H * W
         query_selection : B * CK * H * W
@@ -98,7 +99,16 @@ class XMem(nn.Module):
         batch_size, num_objects = memory_value.shape[:2]
         memory_value = memory_value.flatten(start_dim=1, end_dim=2)
 
-        affinity = get_affinity(memory_key, memory_shrinkage, query_key, query_selection)
+        affinity = get_affinity(
+            memory_key,
+            memory_shrinkage,
+            query_key,
+            query_selection,
+            mem_pos=mem_pos,
+            query_pos=query_pos,
+            sigma=spatial_sigma,
+            lambda_pos=spatial_lambda,
+        )
         memory = readout(affinity, memory_value)
         memory = memory.view(batch_size, num_objects, self.value_dim, *memory.shape[-2:])
 

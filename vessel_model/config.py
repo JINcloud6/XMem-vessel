@@ -37,4 +37,6 @@ xmem_config = {
     'mem_every': 5,
     'deep_update_every': -1,
     'save_scores': False,
+    'spatial_decay_sigma': 8.0,
+    'spatial_decay_lambda': 1.0,
 }

@@ -56,6 +56,8 @@ parser.add_argument('--num_prototypes', help='P in paper', type=int, default=128
 parser.add_argument('--top_k', type=int, default=30)
 parser.add_argument('--mem_every', help='r in paper. Increase to improve running speed.', type=int, default=5)
 parser.add_argument('--deep_update_every', help='Leave -1 normally to synchronize with mem_every', type=int, default=-1)
+parser.add_argument('--spatial_decay_sigma', type=float, default=8.0)
+parser.add_argument('--spatial_decay_lambda', type=float, default=1.0)
 
 # Multi-scale options
 parser.add_argument('--save_scores', action='store_true')

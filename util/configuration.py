@@ -24,6 +24,8 @@ class Configuration():
         parser.add_argument('--hidden_dim', default=64, help='Set to =0 to disable', type=int)
 
         parser.add_argument('--deep_update_prob', default=0.2, type=float)
+        parser.add_argument('--spatial_decay_sigma', default=8.0, type=float)
+        parser.add_argument('--spatial_decay_lambda', default=1.0, type=float)
 
         parser.add_argument('--stages', help='Training stage (0-static images, 1-Blender dataset, 2-DAVIS+YouTubeVOS)', default='02')
 

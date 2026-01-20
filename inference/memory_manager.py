@@ -12,6 +12,8 @@ class MemoryManager:
     def __init__(self, config):
         self.hidden_dim = config['hidden_dim']
         self.top_k = config['top_k']
+        self.spatial_decay_sigma = config.get('spatial_decay_sigma', 8.0)
+        self.spatial_decay_lambda = config.get('spatial_decay_lambda', 1.0)
 
         self.enable_long_term = config['enable_long_term']
         self.enable_long_term_usage = config['enable_long_term_count_usage']
@@ -39,6 +41,8 @@ class MemoryManager:
         self.reset_config = True
         self.hidden_dim = config['hidden_dim']
         self.top_k = config['top_k']
+        self.spatial_decay_sigma = config.get('spatial_decay_sigma', 8.0)
+        self.spatial_decay_lambda = config.get('spatial_decay_lambda', 1.0)
 
         assert self.enable_long_term == config['enable_long_term'], 'cannot update this'
         assert self.enable_long_term_usage == config['enable_long_term_count_usage'], 'cannot update this'
@@ -54,7 +58,7 @@ class MemoryManager:
         # this function is for a single object group
         return v @ affinity
 
-    def match_memory(self, query_key, selection):
+    def match_memory(self, query_key, selection, query_pos=None):
         # query_key: B x C^k x H x W
         # selection:  B x C^k x H x W
         num_groups = self.work_mem.num_groups
@@ -72,8 +76,21 @@ class MemoryManager:
             long_mem_size = self.long_mem.size
             memory_key = torch.cat([self.long_mem.key, self.work_mem.key], -1)
             shrinkage = torch.cat([self.long_mem.shrinkage, self.work_mem.shrinkage], -1) 
+            if self.long_mem.pos is not None and self.work_mem.pos is not None:
+                memory_pos = torch.cat([self.long_mem.pos, self.work_mem.pos], -1)
+            else:
+                memory_pos = None
 
-            similarity = get_similarity(memory_key, shrinkage, query_key, selection)
+            similarity = get_similarity(
+                memory_key,
+                shrinkage,
+                query_key,
+                selection,
+                mem_pos=memory_pos.view(-1) if memory_pos is not None else None,
+                query_pos=query_pos,
+                sigma=self.spatial_decay_sigma,
+                lambda_pos=self.spatial_decay_lambda,
+            )
             work_mem_similarity = similarity[:, long_mem_size:]
             long_mem_similarity = similarity[:, :long_mem_size]
 
@@ -119,7 +136,17 @@ class MemoryManager:
                 self.long_mem.update_usage(long_usage.flatten())
         else:
             # No long-term memory
-            similarity = get_similarity(self.work_mem.key, self.work_mem.shrinkage, query_key, selection)
+            memory_pos = self.work_mem.pos
+            similarity = get_similarity(
+                self.work_mem.key,
+                self.work_mem.shrinkage,
+                query_key,
+                selection,
+                mem_pos=memory_pos.view(-1) if memory_pos is not None else None,
+                query_pos=query_pos,
+                sigma=self.spatial_decay_sigma,
+                lambda_pos=self.spatial_decay_lambda,
+            )
 
             if self.enable_long_term:
                 affinity, usage = do_softmax(similarity, inplace=(num_groups==1), 
@@ -149,7 +176,7 @@ class MemoryManager:
 
         return all_readout_mem.view(all_readout_mem.shape[0], self.CV, h, w)
 
-    def add_memory(self, key, shrinkage, value, objects, selection=None):
+    def add_memory(self, key, shrinkage, value, objects, selection=None, mem_pos=None):
         # key: 1*C*H*W
         # value: 1*num_objects*C*H*W
         # objects contain a list of object indices
@@ -167,6 +194,13 @@ class MemoryManager:
         key = key.flatten(start_dim=2)
         shrinkage = shrinkage.flatten(start_dim=2) 
         value = value[0].flatten(start_dim=2)
+        if mem_pos is not None:
+            mem_pos = torch.as_tensor(mem_pos, device=key.device, dtype=key.dtype).flatten()
+            if mem_pos.numel() == 1:
+                mem_pos = mem_pos.repeat(key.shape[-1])
+            if mem_pos.numel() != key.shape[-1]:
+                raise ValueError('mem_pos length must match the flattened memory size')
+            mem_pos = mem_pos.view(1, 1, -1)
 
         self.CK = key.shape[1]
         self.CV = value.shape[1]
@@ -176,7 +210,7 @@ class MemoryManager:
                 warnings.warn('the selection factor is only needed in long-term mode', UserWarning)
             selection = selection.flatten(start_dim=2)
 
-        self.work_mem.add(key, value, shrinkage, selection, objects)
+        self.work_mem.add(key, value, shrinkage, selection, objects, mem_pos=mem_pos)
 
         # long-term memory cleanup
         if self.enable_long_term:
@@ -231,16 +265,23 @@ class MemoryManager:
                     candidate_value.append(None)
 
         # perform memory consolidation
-        prototype_key, prototype_value, prototype_shrinkage = self.consolidation(
+        prototype_key, prototype_value, prototype_shrinkage, prototype_pos = self.consolidation(
             *self.work_mem.get_all_sliced(HW, -self.min_work_elements+HW), candidate_value)
 
         # remove consolidated working memory
         self.work_mem.sieve_by_range(HW, -self.min_work_elements+HW, min_size=self.min_work_elements+HW)
 
         # add to long-term memory
-        self.long_mem.add(prototype_key, prototype_value, prototype_shrinkage, selection=None, objects=None)
+        self.long_mem.add(
+            prototype_key,
+            prototype_value,
+            prototype_shrinkage,
+            selection=None,
+            objects=None,
+            mem_pos=prototype_pos,
+        )
 
-    def consolidation(self, candidate_key, candidate_shrinkage, candidate_selection, usage, candidate_value):
+    def consolidation(self, candidate_key, candidate_shrinkage, candidate_selection, usage, candidate_pos, candidate_value):
         # keys: 1*C*N
         # values: num_objects*C*N
         N = candidate_key.shape[-1]
@@ -254,6 +295,7 @@ class MemoryManager:
 
         prototype_key = candidate_key[:, :, prototype_indices]
         prototype_selection = candidate_selection[:, :, prototype_indices] if candidate_selection is not None else None
+        prototype_pos = candidate_pos[:, :, prototype_indices] if candidate_pos is not None else None
 
         """
         Potentiation step
@@ -281,4 +323,4 @@ class MemoryManager:
         # readout the shrinkage term
         prototype_shrinkage = self._readout(affinity[0], candidate_shrinkage) if candidate_shrinkage is not None else None
 
-        return prototype_key, prototype_value, prototype_shrinkage
+        return prototype_key, prototype_value, prototype_shrinkage, prototype_pos

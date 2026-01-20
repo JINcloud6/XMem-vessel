@@ -175,7 +175,12 @@ def run_segmentation():
                     first_frame = False
                 
                 with torch.no_grad():
-                    prob = processor.step(rgb, msk, valid_labels=[1] if msk is not None else None)
+                    prob = processor.step(
+                        rgb,
+                        msk,
+                        valid_labels=[1] if msk is not None else None,
+                        query_pos=curr_idx,
+                    )
                     pred = torch.argmax(prob, dim=0).cpu().numpy().astype(np.uint8)
                 
                 if pred.sum() > 5000: break 

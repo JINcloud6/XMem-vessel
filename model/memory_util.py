@@ -4,7 +4,25 @@ import torch
 from typing import Optional
 
 
-def get_similarity(mk, ms, qk, qe):
+def _spatial_decay_bias(mem_pos, query_pos, sigma, lambda_pos, eps, device, dtype, length):
+    if mem_pos is None or query_pos is None or lambda_pos == 0:
+        return None
+
+    mem_pos = torch.as_tensor(mem_pos, device=device, dtype=dtype).flatten()
+    query_pos = torch.as_tensor(query_pos, device=device, dtype=dtype)
+
+    if mem_pos.numel() != length:
+        raise ValueError(f'mem_pos length {mem_pos.numel()} does not match memory length {length}')
+
+    sigma_t = torch.as_tensor(sigma, device=device, dtype=dtype)
+    sigma_t = torch.clamp(sigma_t, min=eps)
+    alpha = torch.exp(-torch.abs(mem_pos - query_pos) / sigma_t)
+    bias = lambda_pos * torch.log(alpha + eps)
+
+    return bias.view(1, -1, 1)
+
+
+def get_similarity(mk, ms, qk, qe, mem_pos=None, query_pos=None, sigma=8.0, lambda_pos=1.0, eps=1e-6):
     # used for training/inference and memory reading/memory potentiation
     # mk: B x CK x [N]    - Memory keys
     # ms: B x  1 x [N]    - Memory shrinkage
@@ -36,6 +54,19 @@ def get_similarity(mk, ms, qk, qe):
     else:
         similarity = similarity / math.sqrt(CK)   # B*N*HW
 
+    bias = _spatial_decay_bias(
+        mem_pos,
+        query_pos,
+        sigma,
+        lambda_pos,
+        eps,
+        similarity.device,
+        similarity.dtype,
+        similarity.shape[1],
+    )
+    if bias is not None:
+        similarity = similarity + bias
+
     return similarity
 
 def do_softmax(similarity, top_k: Optional[int]=None, inplace=False, return_usage=False):
@@ -64,9 +95,19 @@ def do_softmax(similarity, top_k: Optional[int]=None, inplace=False, return_usag
 
     return affinity
 
-def get_affinity(mk, ms, qk, qe):
+def get_affinity(mk, ms, qk, qe, mem_pos=None, query_pos=None, sigma=8.0, lambda_pos=1.0, eps=1e-6):
     # shorthand used in training with no top-k
-    similarity = get_similarity(mk, ms, qk, qe)
+    similarity = get_similarity(
+        mk,
+        ms,
+        qk,
+        qe,
+        mem_pos=mem_pos,
+        query_pos=query_pos,
+        sigma=sigma,
+        lambda_pos=lambda_pos,
+        eps=eps,
+    )
     affinity = do_softmax(similarity)
     return affinity
 
