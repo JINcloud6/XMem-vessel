@@ -39,4 +39,10 @@ xmem_config = {
     'save_scores': False,
     'temporal_decay': 5.0,
     'global_mem_max_elements': 500000,
+    'enable_temporal_decay': True,
+    'enable_global_memory': True,
+    'enable_split_seeding': False,
+    'split_min_area': 200,
+    'split_min_distance': 15,
+    'split_max_new_seeds': 2,
 }
