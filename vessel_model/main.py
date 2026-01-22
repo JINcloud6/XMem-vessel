@@ -212,7 +212,7 @@ def run_segmentation():
                             global_mem.shrinkage,
                             global_mem.selection,
                             objects=[1],
-                            timestamps=None,
+                            timestamps=global_mem.time,
                         )
             _, box = crops[best_axis] 
             
@@ -243,7 +243,7 @@ def run_segmentation():
                     if enable_global_memory and (msk is not None) and (not global_added):
                         latest = processor.memory.get_latest_work_memory()
                         if latest is not None:
-                            key, shrinkage, value, selection = latest
+                            key, shrinkage, value, selection, timestamps = latest
                             global_mem = global_memories.get(best_axis)
                             if global_mem is not None:
                                 global_mem.add(
@@ -252,7 +252,7 @@ def run_segmentation():
                                     shrinkage,
                                     selection,
                                     objects=[1],
-                                    timestamps=None,
+                                    timestamps=timestamps,
                                 )
                                 if global_mem_max_elements > 0:
                                     global_mem.keep_last(global_mem_max_elements)

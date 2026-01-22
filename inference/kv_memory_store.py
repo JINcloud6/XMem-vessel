@@ -38,6 +38,8 @@ class KeyValueMemoryStore:
     def add(self, key, value, shrinkage, selection, objects: List[int], timestamps=None):
         new_count = torch.zeros((key.shape[0], 1, key.shape[2]), device=key.device, dtype=torch.float32)
         new_life = torch.zeros((key.shape[0], 1, key.shape[2]), device=key.device, dtype=torch.float32) + 1e-7
+        if timestamps is None and self.t is not None:
+            timestamps = torch.zeros((key.shape[0], 1, key.shape[2]), device=key.device, dtype=key.dtype)
 
         # add the key
         if self.k is None:

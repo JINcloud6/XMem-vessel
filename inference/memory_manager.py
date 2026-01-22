@@ -245,8 +245,9 @@ class MemoryManager:
         key = self.work_mem.key[:, :, start:]
         shrinkage = self.work_mem.shrinkage[:, :, start:] if self.work_mem.shrinkage is not None else None
         selection = self.work_mem.selection[:, :, start:] if self.work_mem.selection is not None else None
+        timestamps = self.work_mem.time[:, :, start:] if self.work_mem.time is not None else None
         value = self.work_mem.value[0][:, :, -last_n:]
-        return key, shrinkage, value, selection
+        return key, shrinkage, value, selection, timestamps
 
     def compress_features(self):
         HW = self.HW
@@ -316,7 +317,8 @@ class MemoryManager:
 
         # some values can be have all False validity. Weed them out.
         affinity = [
-            aff if aff is None or aff.shape[-1] > 0 else None for aff in affinity
+            aff if aff is None or (aff.shape[1] > 0 and aff.shape[-1] > 0) else None
+            for aff in affinity
         ]
 
         # readout the values
@@ -327,6 +329,9 @@ class MemoryManager:
 
         # readout the shrinkage term
         prototype_shrinkage = self._readout(affinity[0], candidate_shrinkage) if candidate_shrinkage is not None else None
-        prototype_time = self._readout(affinity[0], candidate_time) if candidate_time is not None else None
+        prototype_time = None
+        if candidate_time is not None and affinity[0] is not None:
+            if affinity[0].shape[1] > 0:
+                prototype_time = self._readout(affinity[0], candidate_time)
 
         return prototype_key, prototype_value, prototype_shrinkage, prototype_time
