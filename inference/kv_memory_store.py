@@ -176,6 +176,25 @@ class KeyValueMemoryStore:
             usage = self.use_count / self.life_count
             return usage
 
+    def keep_last(self, max_size: int):
+        if self.k is None or self.size <= max_size:
+            return
+        start = self.size - max_size
+        self.k = self.k[:, :, start:]
+        if self.s is not None:
+            self.s = self.s[:, :, start:]
+        if self.e is not None:
+            self.e = self.e[:, :, start:]
+        if self.t is not None:
+            self.t = self.t[:, :, start:]
+        if self.count_usage:
+            self.use_count = self.use_count[:, :, start:]
+            self.life_count = self.life_count[:, :, start:]
+        for gi in range(self.num_groups):
+            gv = self.v[gi]
+            if gv.shape[-1] > max_size:
+                self.v[gi] = gv[:, :, -max_size:]
+
     def get_all_sliced(self, start: int, end: int):
         # return k, sk, ek, t, usage in order, sliced by start and end
 

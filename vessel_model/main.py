@@ -101,7 +101,12 @@ def run_segmentation():
         processor.set_all_labels([1])
     else:
         print('use different vos')
-    global_mem = KeyValueMemoryStore(count_usage=False)
+    global_memories = {
+        0: KeyValueMemoryStore(count_usage=False),
+        1: KeyValueMemoryStore(count_usage=False),
+        2: KeyValueMemoryStore(count_usage=False),
+    }
+    global_mem_max_elements = xmem_config.get('global_mem_max_elements', 0)
     for seed in tqdm(seeds, desc="Tracking"):
         z, y, x = seed
         
@@ -154,11 +159,22 @@ def run_segmentation():
         if not useonevos:
             processor = InferenceCore(xmem, config=xmem_config)
             processor.set_all_labels([1])
+            global_mem = global_memories.get(best_axis)
+            if global_mem is not None and global_mem.engaged():
+                processor.memory.work_mem.add(
+                    global_mem.key,
+                    global_mem.value[0],
+                    global_mem.shrinkage,
+                    global_mem.selection,
+                    objects=[1],
+                    timestamps=None,
+                )
         _, box = crops[best_axis] 
         
         for seq in sequences:
             if not seq: continue
             first_frame = True
+            global_added = False
             for curr_idx in seq:
                 # Dynamic slicing
                 if best_axis==0: sl = vol_man.vol[curr_idx, box[1]:box[2], box[3]:box[4]]
@@ -177,6 +193,24 @@ def run_segmentation():
                 with torch.no_grad():
                     prob = processor.step(rgb, msk, valid_labels=[1] if msk is not None else None)
                     pred = torch.argmax(prob, dim=0).cpu().numpy().astype(np.uint8)
+
+                if (msk is not None) and (not global_added):
+                    latest = processor.memory.get_latest_work_memory()
+                    if latest is not None:
+                        key, shrinkage, value, selection = latest
+                        global_mem = global_memories.get(best_axis)
+                        if global_mem is not None:
+                            global_mem.add(
+                                key,
+                                value,
+                                shrinkage,
+                                selection,
+                                objects=[1],
+                                timestamps=None,
+                            )
+                            if global_mem_max_elements > 0:
+                                global_mem.keep_last(global_mem_max_elements)
+                    global_added = True
                 
                 if pred.sum() > 5000: break 
                 

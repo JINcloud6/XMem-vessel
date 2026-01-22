@@ -38,4 +38,5 @@ xmem_config = {
     'deep_update_every': -1,
     'save_scores': False,
     'temporal_decay': 5.0,
+    'global_mem_max_elements': 500000,
 }

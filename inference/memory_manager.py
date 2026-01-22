@@ -235,6 +235,19 @@ class MemoryManager:
     def get_hidden(self):
         return self.hidden
 
+    def get_latest_work_memory(self):
+        if self.work_mem.size == 0 or self.work_mem.num_groups == 0:
+            return None
+        last_n = self.work_mem.value[0].shape[-1]
+        if last_n == 0:
+            return None
+        start = self.work_mem.size - last_n
+        key = self.work_mem.key[:, :, start:]
+        shrinkage = self.work_mem.shrinkage[:, :, start:] if self.work_mem.shrinkage is not None else None
+        selection = self.work_mem.selection[:, :, start:] if self.work_mem.selection is not None else None
+        value = self.work_mem.value[0][:, :, -last_n:]
+        return key, shrinkage, value, selection
+
     def compress_features(self):
         HW = self.HW
         candidate_value = []
