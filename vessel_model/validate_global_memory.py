@@ -1,5 +1,7 @@
 import argparse
+import os
 import sys
+from contextlib import redirect_stdout, redirect_stderr
 
 from vessel_model.main import run_segmentation, xmem_config
 
@@ -15,6 +17,8 @@ def main():
                         help="Comma-separated methods: all, nearest, similarity")
     parser.add_argument("--ks", default="50,100,200",
                         help="Comma-separated top-k values")
+    parser.add_argument("--output_dir", default="global_memory_logs",
+                        help="Directory to store per-run logs")
     parser.add_argument("--dry_run", action="store_true",
                         help="Only print configurations without running segmentation")
     args, remaining = parser.parse_known_args()
@@ -22,16 +26,22 @@ def main():
     methods = parse_list(args.methods, cast=str)
     ks = parse_list(args.ks, cast=int)
 
+    os.makedirs(args.output_dir, exist_ok=True)
+
     for method in methods:
         for k in ks:
             xmem_config["enable_global_memory"] = True
             xmem_config["global_mem_select_method"] = method
             xmem_config["global_mem_topk"] = k
-            print(f"[GlobalMemory] method={method} topk={k}")
+            log_name = f"global_memory_{method}_topk{k}.log"
+            log_path = os.path.join(args.output_dir, log_name)
+            print(f"[GlobalMemory] method={method} topk={k} log={log_path}")
             if args.dry_run:
                 continue
             sys.argv = [sys.argv[0]] + remaining
-            run_segmentation()
+            with open(log_path, "w", encoding="utf-8") as log_file:
+                with redirect_stdout(log_file), redirect_stderr(log_file):
+                    run_segmentation()
 
 
 if __name__ == "__main__":
