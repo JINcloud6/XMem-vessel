@@ -13,6 +13,7 @@ class MemoryManager:
         self.hidden_dim = config['hidden_dim']
         self.top_k = config['top_k']
         self.temporal_decay = config.get('temporal_decay', 0)
+        self.enable_attention_entropy = config.get('enable_attention_entropy', False)
 
         self.enable_long_term = config['enable_long_term']
         self.enable_long_term_usage = config['enable_long_term_count_usage']
@@ -35,12 +36,15 @@ class MemoryManager:
             self.long_mem = KeyValueMemoryStore(count_usage=self.enable_long_term_usage)
 
         self.reset_config = True
+        self.last_attn = None
+        self.last_attn_hw = None
 
     def update_config(self, config):
         self.reset_config = True
         self.hidden_dim = config['hidden_dim']
         self.top_k = config['top_k']
         self.temporal_decay = config.get('temporal_decay', 0)
+        self.enable_attention_entropy = config.get('enable_attention_entropy', False)
 
         assert self.enable_long_term == config['enable_long_term'], 'cannot update this'
         assert self.enable_long_term_usage == config['enable_long_term_count_usage'], 'cannot update this'
@@ -164,6 +168,13 @@ class MemoryManager:
                 
             all_memory_value = self.work_mem.value
 
+        if self.enable_attention_entropy:
+            self.last_attn = affinity[0].detach()
+            self.last_attn_hw = (h, w)
+        else:
+            self.last_attn = None
+            self.last_attn_hw = None
+
         # Shared affinity within each group
         all_readout_mem = torch.cat([
             self._readout(affinity[gi], gv)
@@ -171,6 +182,11 @@ class MemoryManager:
         ], 0)
 
         return all_readout_mem.view(all_readout_mem.shape[0], self.CV, h, w)
+
+    def get_last_attention(self):
+        if self.last_attn is None:
+            return None, None
+        return self.last_attn, self.last_attn_hw
 
     def add_memory(self, key, shrinkage, value, objects, selection=None, curr_ti=None):
         # key: 1*C*H*W

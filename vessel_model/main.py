@@ -21,7 +21,7 @@ from scipy import ndimage
 
 # --- Local Imports ---
 from .config import get_args, xmem_config
-from .utils import select_masks
+from .utils import select_masks, compute_attention_entropy, EntropyStopper
 from .preprocessing import get_multi_axis_init_seg, get_seeds_from_init_seg
 from .data_manager import VolumeManager
 
@@ -44,11 +44,24 @@ def run_segmentation():
     enable_temporal_decay = xmem_config.get('enable_temporal_decay', True)
     enable_global_memory = xmem_config.get('enable_global_memory', True)
     enable_split_seeding = xmem_config.get('enable_split_seeding', False)
+    enable_attention_entropy = xmem_config.get('enable_attention_entropy', False)
+    enable_entropy_stop = xmem_config.get('enable_entropy_stop', False)
     split_min_area = xmem_config.get('split_min_area', 200)
     split_min_distance = xmem_config.get('split_min_distance', 15)
     split_max_new_seeds = xmem_config.get('split_max_new_seeds', 2)
+    entropy_sample_points = xmem_config.get('entropy_sample_points', 1024)
+    entropy_window = xmem_config.get('entropy_window', 20)
+    entropy_z_threshold = xmem_config.get('entropy_z_threshold', 2.0)
+    entropy_abnormal_count = xmem_config.get('entropy_abnormal_count', 3)
+    entropy_min_mask_pixels = xmem_config.get('entropy_min_mask_pixels', 20)
+    entropy_boundary_points = xmem_config.get('entropy_boundary_points', 10)
+    entropy_overlap_threshold = xmem_config.get('entropy_overlap_threshold', 0.5)
+    entropy_debug = xmem_config.get('entropy_debug', False)
     if not enable_temporal_decay:
         xmem_config['temporal_decay'] = 0.0
+    if enable_entropy_stop:
+        enable_attention_entropy = True
+    xmem_config['enable_attention_entropy'] = enable_attention_entropy
     
     # 1. Load Data
     print(f"Loading volume from {args.volume_path}...")
@@ -146,6 +159,63 @@ def run_segmentation():
         (y1, x1, _), (y2, x2, _) = centers[0], centers[1]
         return np.hypot(y1 - y2, x1 - x2) >= split_min_distance
 
+    def _sample_boundary_points(mask, num_points):
+        if mask.sum() == 0:
+            return np.empty((0, 2), dtype=np.int32)
+        eroded = ndimage.binary_erosion(mask > 0)
+        boundary = (mask > 0) & (~eroded)
+        coords = np.argwhere(boundary)
+        if coords.size == 0:
+            coords = np.argwhere(mask > 0)
+        if coords.size == 0:
+            return np.empty((0, 2), dtype=np.int32)
+        if coords.shape[0] > num_points:
+            idx = np.random.choice(coords.shape[0], num_points, replace=False)
+            coords = coords[idx]
+        return coords
+
+    def _resample_seeds_with_sam(mask, slice_image, axis, curr_idx, box):
+        points = _sample_boundary_points(mask, entropy_boundary_points)
+        if points.size == 0:
+            return []
+        img = np.stack([slice_image]*3, axis=-1)
+        sam_predictor.set_image(img)
+        new_seeds = []
+        for py, px in points:
+            masks, scores, _ = sam_predictor.predict(
+                point_coords=np.array([[px, py]]),
+                point_labels=np.array([1]),
+                multimask_output=True
+            )
+            cand_mask, _ = select_masks(masks, scores, thr=0.9, crit='max', max_size=5000, min_circularity=0.6)
+            if cand_mask is None:
+                continue
+            if axis == 0:
+                existing = vol_man.global_mask[curr_idx, box[1]:box[2], box[3]:box[4]]
+            elif axis == 1:
+                existing = vol_man.global_mask[box[1]:box[2], curr_idx, box[3]:box[4]]
+            else:
+                existing = vol_man.global_mask[box[1]:box[2], box[3]:box[4], curr_idx]
+            overlap = (cand_mask & (existing > 0)).sum()
+            ratio = overlap / (cand_mask.sum() + 1e-6)
+            if ratio > entropy_overlap_threshold:
+                continue
+            cy, cx = ndimage.center_of_mass(cand_mask)
+            if np.isnan(cy) or np.isnan(cx):
+                continue
+            cy_i = int(round(cy))
+            cx_i = int(round(cx))
+            if axis == 0:
+                new_seed = (curr_idx, box[1] + cy_i, box[3] + cx_i)
+            elif axis == 1:
+                new_seed = (box[1] + cy_i, curr_idx, box[3] + cx_i)
+            else:
+                new_seed = (box[1] + cy_i, box[3] + cx_i, curr_idx)
+            nz, ny, nx = new_seed
+            if vol_man.global_mask[nz, ny, nx] == 0:
+                new_seeds.append(new_seed)
+        return new_seeds
+
     seed_index = 0
     with tqdm(total=len(seeds), desc="Tracking") as pbar:
         while seed_index < len(seeds):
@@ -199,6 +269,9 @@ def run_segmentation():
                 range(start_idx, min(start_idx + max_dist, vol_man.shape[track_dim])),
                 range(start_idx, max(start_idx - max_dist, -1), -1)
             ]
+            entropy_stopper = None
+            if enable_entropy_stop:
+                entropy_stopper = EntropyStopper(w=entropy_window, k=entropy_z_threshold, T=entropy_abnormal_count)
             
             if not useonevos:
                 processor = InferenceCore(xmem, config=xmem_config)
@@ -221,6 +294,9 @@ def run_segmentation():
                 first_frame = True
                 global_added = False
                 split_handled = False
+                stop_triggered = False
+                stop_info = None
+                stop_state = None
                 for curr_idx in seq:
                     # Dynamic slicing
                     if best_axis==0: sl = vol_man.vol[curr_idx, box[1]:box[2], box[3]:box[4]]
@@ -240,6 +316,38 @@ def run_segmentation():
                         prob = processor.step(rgb, msk, valid_labels=[1] if msk is not None else None)
                         pred = torch.argmax(prob, dim=0).cpu().numpy().astype(np.uint8)
 
+                    if enable_entropy_stop and entropy_stopper is not None:
+                        attn_weights, _ = processor.memory.get_last_attention()
+                        if attn_weights is not None:
+                            if pred.sum() < entropy_min_mask_pixels:
+                                stop_triggered = True
+                                stop_info = ("mask_too_small", None, None)
+                                stop_state = {
+                                    "stop_slice_index": curr_idx,
+                                    "stop_reason": "mask_too_small",
+                                    "entropy_value": None,
+                                    "z_value": None,
+                                }
+                            else:
+                                entropy_value = compute_attention_entropy(
+                                    attn_weights, pred, sample_points=entropy_sample_points
+                                )
+                                stop, z_value, abnormal_count = entropy_stopper.update(entropy_value)
+                                if entropy_debug:
+                                    print(
+                                        f"[Entropy] slice={curr_idx} H={entropy_value} Z={z_value:.3f} "
+                                        f"abnormal={abnormal_count}"
+                                    )
+                                if stop:
+                                    stop_triggered = True
+                                    stop_info = ("high_entropy", entropy_value, z_value)
+                                    stop_state = {
+                                        "stop_slice_index": curr_idx,
+                                        "stop_reason": "high_entropy",
+                                        "entropy_value": entropy_value,
+                                        "z_value": z_value,
+                                    }
+
                     if enable_global_memory and (msk is not None) and (not global_added):
                         latest = processor.memory.get_latest_work_memory()
                         if latest is not None:
@@ -257,6 +365,23 @@ def run_segmentation():
                                 if global_mem_max_elements > 0:
                                     global_mem.keep_last(global_mem_max_elements)
                         global_added = True
+
+                    if stop_triggered:
+                        if stop_info is not None:
+                            reason, entropy_value, z_value = stop_info
+                            if entropy_debug:
+                                print(
+                                    f"[EntropyStop] slice={curr_idx} reason={reason} "
+                                    f"H={entropy_value} Z={z_value}"
+                                )
+                        if entropy_debug and stop_state is not None:
+                            print(f"[EntropyStopState] {stop_state}")
+                        if enable_entropy_stop:
+                            new_seeds = _resample_seeds_with_sam(pred, sl, best_axis, curr_idx, box)
+                            for new_seed in new_seeds:
+                                seeds.append(new_seed)
+                                pbar.total = len(seeds)
+                        break
 
                     if enable_split_seeding and (not split_handled):
                         centers = _split_centers(pred)
@@ -282,6 +407,8 @@ def run_segmentation():
                         vol_man.update_global_mask(pred, best_axis, (curr_idx, *box[1:]))
                     else:
                         break
+                if stop_triggered:
+                    break
 
             processed_count += 1
             if not useonevos:
