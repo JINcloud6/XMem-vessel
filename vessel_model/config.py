@@ -41,6 +41,8 @@ xmem_config = {
     'global_mem_max_elements': 500000,
     'enable_temporal_decay': True,
     'enable_global_memory': True,
+    'global_mem_select_method': 'all',
+    'global_mem_topk': 200,
     'enable_split_seeding': False,
     'split_min_area': 200,
     'split_min_distance': 15,

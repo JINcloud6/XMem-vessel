@@ -29,6 +29,7 @@ from .data_manager import VolumeManager
 # 假设父目录结构包含这些模块
 try:
     from model.network import XMem
+    from model.memory_util import get_similarity
     from inference.inference_core import InferenceCore
     from inference.kv_memory_store import KeyValueMemoryStore
     from segment_anything import sam_model_registry, SamPredictor
@@ -46,6 +47,8 @@ def run_segmentation():
     enable_split_seeding = xmem_config.get('enable_split_seeding', False)
     enable_attention_entropy = xmem_config.get('enable_attention_entropy', False)
     enable_entropy_stop = xmem_config.get('enable_entropy_stop', False)
+    global_mem_select_method = xmem_config.get('global_mem_select_method', 'all')
+    global_mem_topk = xmem_config.get('global_mem_topk', 0)
     split_min_area = xmem_config.get('split_min_area', 200)
     split_min_distance = xmem_config.get('split_min_distance', 15)
     split_max_new_seeds = xmem_config.get('split_max_new_seeds', 2)
@@ -216,6 +219,35 @@ def run_segmentation():
                 new_seeds.append(new_seed)
         return new_seeds
 
+    def _slice_global_memory(global_mem, indices):
+        key = global_mem.key.index_select(-1, indices)
+        shrinkage = global_mem.shrinkage.index_select(-1, indices) if global_mem.shrinkage is not None else None
+        selection = global_mem.selection.index_select(-1, indices) if global_mem.selection is not None else None
+        timestamps = global_mem.time.index_select(-1, indices) if global_mem.time is not None else None
+        value = global_mem.value[0].index_select(-1, indices)
+        return key, value, shrinkage, selection, timestamps
+
+    def _select_global_memory(global_mem, method, k, curr_idx=None, query_key=None):
+        if global_mem is None or not global_mem.engaged():
+            return None
+        if method == 'all' or k <= 0 or global_mem.size <= k:
+            return global_mem.key, global_mem.value[0], global_mem.shrinkage, global_mem.selection, global_mem.time
+        if method == 'nearest':
+            if global_mem.time is None or curr_idx is None:
+                return global_mem.key, global_mem.value[0], global_mem.shrinkage, global_mem.selection, global_mem.time
+            dist = (global_mem.time - float(curr_idx)).abs().view(-1)
+            _, indices = torch.topk(dist, k=k, largest=False)
+            return _slice_global_memory(global_mem, indices)
+        if method == 'similarity':
+            if query_key is None:
+                return global_mem.key, global_mem.value[0], global_mem.shrinkage, global_mem.selection, global_mem.time
+            query_key_flat = query_key.flatten(start_dim=2)
+            similarity = get_similarity(global_mem.key, global_mem.shrinkage, query_key_flat, None)
+            score = similarity.mean(dim=2).squeeze(0)
+            _, indices = torch.topk(score, k=k, largest=True)
+            return _slice_global_memory(global_mem, indices)
+        return global_mem.key, global_mem.value[0], global_mem.shrinkage, global_mem.selection, global_mem.time
+
     seed_index = 0
     with tqdm(total=len(seeds), desc="Tracking") as pbar:
         while seed_index < len(seeds):
@@ -276,17 +308,7 @@ def run_segmentation():
             if not useonevos:
                 processor = InferenceCore(xmem, config=xmem_config)
                 processor.set_all_labels([1])
-                if enable_global_memory:
-                    global_mem = global_memories.get(best_axis)
-                    if global_mem is not None and global_mem.engaged():
-                        processor.memory.work_mem.add(
-                            global_mem.key,
-                            global_mem.value[0],
-                            global_mem.shrinkage,
-                            global_mem.selection,
-                            objects=[1],
-                            timestamps=global_mem.time,
-                        )
+            global_mem = global_memories.get(best_axis) if enable_global_memory else None
             _, box = crops[best_axis] 
             
             for seq in sequences:
@@ -294,6 +316,7 @@ def run_segmentation():
                 first_frame = True
                 global_added = False
                 split_handled = False
+                injected_global = False
                 stop_triggered = False
                 stop_info = None
                 stop_state = None
@@ -306,6 +329,33 @@ def run_segmentation():
                     if sl.size == 0: break
                     
                     rgb = torch.from_numpy(np.stack([sl]*3, -1)).permute(2,0,1).float().to(args.device)/255.0
+
+                    if (not injected_global) and enable_global_memory and global_mem is not None and global_mem.engaged():
+                        if first_frame:
+                            with torch.no_grad():
+                                key, shrinkage, _, _, _, _ = xmem.encode_key(
+                                    rgb.unsqueeze(0),
+                                    need_ek=False,
+                                    need_sk=False,
+                                )
+                            selected = _select_global_memory(
+                                global_mem,
+                                global_mem_select_method,
+                                global_mem_topk,
+                                curr_idx=curr_idx,
+                                query_key=key,
+                            )
+                            if selected is not None:
+                                sel_key, sel_value, sel_shrinkage, sel_selection, sel_time = selected
+                                processor.memory.work_mem.add(
+                                    sel_key,
+                                    sel_value,
+                                    sel_shrinkage,
+                                    sel_selection,
+                                    objects=[1],
+                                    timestamps=sel_time,
+                                )
+                            injected_global = True
                     
                     msk = None
                     if first_frame:
