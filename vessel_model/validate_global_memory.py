@@ -17,7 +17,9 @@ def main():
                         help="Comma-separated methods: all, nearest, similarity")
     parser.add_argument("--ks", default="50,100,200",
                         help="Comma-separated top-k values")
-    parser.add_argument("--output_dir", default="global_memory_logs",
+    parser.add_argument("--output_dir", default="./bv_seg_output",
+                        help="Output directory for segmentation results")
+    parser.add_argument("--log_dir", default="global_memory_logs",
                         help="Directory to store per-run logs")
     parser.add_argument("--output_prefix", default="global_memory",
                         help="Prefix for output nii.gz files")
@@ -29,6 +31,7 @@ def main():
     ks = parse_list(args.ks, cast=int)
 
     os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(args.log_dir, exist_ok=True)
 
     def _strip_arg(argv, flag):
         if flag not in argv:
@@ -44,13 +47,17 @@ def main():
             xmem_config["global_mem_select_method"] = method
             xmem_config["global_mem_topk"] = k
             log_name = f"global_memory_{method}_topk{k}.log"
-            log_path = os.path.join(args.output_dir, log_name)
+            log_path = os.path.join(args.log_dir, log_name)
             output_name = f"{args.output_prefix}_{method}_topk{k}.nii.gz"
             print(f"[GlobalMemory] method={method} topk={k} log={log_path}")
             if args.dry_run:
                 continue
             base_args = _strip_arg(list(remaining), "--output_filename")
-            sys.argv = [sys.argv[0]] + base_args + ["--output_filename", output_name]
+            base_args = _strip_arg(base_args, "--output_dir")
+            sys.argv = [sys.argv[0]] + base_args + [
+                "--output_dir", args.output_dir,
+                "--output_filename", output_name,
+            ]
             with open(log_path, "w", encoding="utf-8") as log_file:
                 with redirect_stdout(log_file), redirect_stderr(log_file):
                     run_segmentation()
