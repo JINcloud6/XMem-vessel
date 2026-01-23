@@ -19,6 +19,8 @@ def main():
                         help="Comma-separated top-k values")
     parser.add_argument("--output_dir", default="global_memory_logs",
                         help="Directory to store per-run logs")
+    parser.add_argument("--output_prefix", default="global_memory",
+                        help="Prefix for output nii.gz files")
     parser.add_argument("--dry_run", action="store_true",
                         help="Only print configurations without running segmentation")
     args, remaining = parser.parse_known_args()
@@ -28,6 +30,14 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
+    def _strip_arg(argv, flag):
+        if flag not in argv:
+            return argv
+        idx = argv.index(flag)
+        if idx < len(argv) - 1:
+            return argv[:idx] + argv[idx+2:]
+        return argv[:idx]
+
     for method in methods:
         for k in ks:
             xmem_config["enable_global_memory"] = True
@@ -35,10 +45,12 @@ def main():
             xmem_config["global_mem_topk"] = k
             log_name = f"global_memory_{method}_topk{k}.log"
             log_path = os.path.join(args.output_dir, log_name)
+            output_name = f"{args.output_prefix}_{method}_topk{k}.nii.gz"
             print(f"[GlobalMemory] method={method} topk={k} log={log_path}")
             if args.dry_run:
                 continue
-            sys.argv = [sys.argv[0]] + remaining
+            base_args = _strip_arg(list(remaining), "--output_filename")
+            sys.argv = [sys.argv[0]] + base_args + ["--output_filename", output_name]
             with open(log_path, "w", encoding="utf-8") as log_file:
                 with redirect_stdout(log_file), redirect_stderr(log_file):
                     run_segmentation()
