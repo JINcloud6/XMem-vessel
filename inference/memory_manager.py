@@ -12,6 +12,8 @@ class MemoryManager:
     def __init__(self, config):
         self.hidden_dim = config['hidden_dim']
         self.top_k = config['top_k']
+        self.temporal_decay = config.get('temporal_decay', 0)
+        self.enable_attention_entropy = config.get('enable_attention_entropy', False)
 
         self.enable_long_term = config['enable_long_term']
         self.enable_long_term_usage = config['enable_long_term_count_usage']
@@ -34,11 +36,15 @@ class MemoryManager:
             self.long_mem = KeyValueMemoryStore(count_usage=self.enable_long_term_usage)
 
         self.reset_config = True
+        self.last_attn = None
+        self.last_attn_hw = None
 
     def update_config(self, config):
         self.reset_config = True
         self.hidden_dim = config['hidden_dim']
         self.top_k = config['top_k']
+        self.temporal_decay = config.get('temporal_decay', 0)
+        self.enable_attention_entropy = config.get('enable_attention_entropy', False)
 
         assert self.enable_long_term == config['enable_long_term'], 'cannot update this'
         assert self.enable_long_term_usage == config['enable_long_term_count_usage'], 'cannot update this'
@@ -54,7 +60,17 @@ class MemoryManager:
         # this function is for a single object group
         return v @ affinity
 
-    def match_memory(self, query_key, selection):
+    def _apply_temporal_weight(self, similarity, memory_time, curr_ti):
+        if (self.temporal_decay is None) or (self.temporal_decay <= 0):
+            return similarity
+        if memory_time is None or curr_ti is None:
+            return similarity
+        dist = (curr_ti - memory_time).abs()
+        weight = torch.exp(-dist / self.temporal_decay)
+        log_weight = torch.log(weight.clamp_min(1e-6)).transpose(1, 2)
+        return similarity + log_weight
+
+    def match_memory(self, query_key, selection, curr_ti=None):
         # query_key: B x C^k x H x W
         # selection:  B x C^k x H x W
         num_groups = self.work_mem.num_groups
@@ -72,8 +88,18 @@ class MemoryManager:
             long_mem_size = self.long_mem.size
             memory_key = torch.cat([self.long_mem.key, self.work_mem.key], -1)
             shrinkage = torch.cat([self.long_mem.shrinkage, self.work_mem.shrinkage], -1) 
+            memory_time = None
+            if curr_ti is not None and (self.long_mem.time is not None or self.work_mem.time is not None):
+                long_time = self.long_mem.time
+                work_time = self.work_mem.time
+                if long_time is None:
+                    long_time = torch.full_like(self.long_mem.key[:, :1, :], float(curr_ti))
+                if work_time is None:
+                    work_time = torch.full_like(self.work_mem.key[:, :1, :], float(curr_ti))
+                memory_time = torch.cat([long_time, work_time], -1)
 
             similarity = get_similarity(memory_key, shrinkage, query_key, selection)
+            similarity = self._apply_temporal_weight(similarity, memory_time, curr_ti)
             work_mem_similarity = similarity[:, long_mem_size:]
             long_mem_similarity = similarity[:, :long_mem_size]
 
@@ -120,6 +146,7 @@ class MemoryManager:
         else:
             # No long-term memory
             similarity = get_similarity(self.work_mem.key, self.work_mem.shrinkage, query_key, selection)
+            similarity = self._apply_temporal_weight(similarity, self.work_mem.time, curr_ti)
 
             if self.enable_long_term:
                 affinity, usage = do_softmax(similarity, inplace=(num_groups==1), 
@@ -141,6 +168,13 @@ class MemoryManager:
                 
             all_memory_value = self.work_mem.value
 
+        if self.enable_attention_entropy:
+            self.last_attn = affinity[0].detach()
+            self.last_attn_hw = (h, w)
+        else:
+            self.last_attn = None
+            self.last_attn_hw = None
+
         # Shared affinity within each group
         all_readout_mem = torch.cat([
             self._readout(affinity[gi], gv)
@@ -149,7 +183,12 @@ class MemoryManager:
 
         return all_readout_mem.view(all_readout_mem.shape[0], self.CV, h, w)
 
-    def add_memory(self, key, shrinkage, value, objects, selection=None):
+    def get_last_attention(self):
+        if self.last_attn is None:
+            return None, None
+        return self.last_attn, self.last_attn_hw
+
+    def add_memory(self, key, shrinkage, value, objects, selection=None, curr_ti=None):
         # key: 1*C*H*W
         # value: 1*num_objects*C*H*W
         # objects contain a list of object indices
@@ -167,6 +206,10 @@ class MemoryManager:
         key = key.flatten(start_dim=2)
         shrinkage = shrinkage.flatten(start_dim=2) 
         value = value[0].flatten(start_dim=2)
+        timestamps = None
+        if curr_ti is not None:
+            timestamps = torch.full((key.shape[0], 1, key.shape[2]), float(curr_ti),
+                                    device=key.device, dtype=key.dtype)
 
         self.CK = key.shape[1]
         self.CV = value.shape[1]
@@ -176,7 +219,7 @@ class MemoryManager:
                 warnings.warn('the selection factor is only needed in long-term mode', UserWarning)
             selection = selection.flatten(start_dim=2)
 
-        self.work_mem.add(key, value, shrinkage, selection, objects)
+        self.work_mem.add(key, value, shrinkage, selection, objects, timestamps=timestamps)
 
         # long-term memory cleanup
         if self.enable_long_term:
@@ -208,6 +251,20 @@ class MemoryManager:
     def get_hidden(self):
         return self.hidden
 
+    def get_latest_work_memory(self):
+        if self.work_mem.size == 0 or self.work_mem.num_groups == 0:
+            return None
+        last_n = self.work_mem.value[0].shape[-1]
+        if last_n == 0:
+            return None
+        start = self.work_mem.size - last_n
+        key = self.work_mem.key[:, :, start:]
+        shrinkage = self.work_mem.shrinkage[:, :, start:] if self.work_mem.shrinkage is not None else None
+        selection = self.work_mem.selection[:, :, start:] if self.work_mem.selection is not None else None
+        timestamps = self.work_mem.time[:, :, start:] if self.work_mem.time is not None else None
+        value = self.work_mem.value[0][:, :, -last_n:]
+        return key, shrinkage, value, selection, timestamps
+
     def compress_features(self):
         HW = self.HW
         candidate_value = []
@@ -231,16 +288,23 @@ class MemoryManager:
                     candidate_value.append(None)
 
         # perform memory consolidation
-        prototype_key, prototype_value, prototype_shrinkage = self.consolidation(
+        prototype_key, prototype_value, prototype_shrinkage, prototype_time = self.consolidation(
             *self.work_mem.get_all_sliced(HW, -self.min_work_elements+HW), candidate_value)
 
         # remove consolidated working memory
         self.work_mem.sieve_by_range(HW, -self.min_work_elements+HW, min_size=self.min_work_elements+HW)
 
         # add to long-term memory
-        self.long_mem.add(prototype_key, prototype_value, prototype_shrinkage, selection=None, objects=None)
+        self.long_mem.add(
+            prototype_key,
+            prototype_value,
+            prototype_shrinkage,
+            selection=None,
+            objects=None,
+            timestamps=prototype_time,
+        )
 
-    def consolidation(self, candidate_key, candidate_shrinkage, candidate_selection, usage, candidate_value):
+    def consolidation(self, candidate_key, candidate_shrinkage, candidate_selection, candidate_time, usage, candidate_value):
         # keys: 1*C*N
         # values: num_objects*C*N
         N = candidate_key.shape[-1]
@@ -269,7 +333,8 @@ class MemoryManager:
 
         # some values can be have all False validity. Weed them out.
         affinity = [
-            aff if aff is None or aff.shape[-1] > 0 else None for aff in affinity
+            aff if aff is None or (aff.shape[1] > 0 and aff.shape[-1] > 0) else None
+            for aff in affinity
         ]
 
         # readout the values
@@ -280,5 +345,9 @@ class MemoryManager:
 
         # readout the shrinkage term
         prototype_shrinkage = self._readout(affinity[0], candidate_shrinkage) if candidate_shrinkage is not None else None
+        prototype_time = None
+        if candidate_time is not None and affinity[0] is not None:
+            if affinity[0].shape[1] > 0:
+                prototype_time = self._readout(affinity[0], candidate_time)
 
-        return prototype_key, prototype_value, prototype_shrinkage
+        return prototype_key, prototype_value, prototype_shrinkage, prototype_time

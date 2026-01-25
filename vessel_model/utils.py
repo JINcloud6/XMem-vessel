@@ -48,6 +48,79 @@ def print_gpu_memory(stage_name=""):
 
 import numpy as np
 from skimage.measure import perimeter
+from collections import deque
+
+def compute_attention_entropy(attn_weights, mask, sample_points=1024, eps=1e-6, target_hw=None):
+    """
+    Compute attention entropy within mask region.
+    attn_weights: Tensor [1, N, HW] or [N, H, W]
+    mask: numpy or torch array [H, W] (binary)
+    """
+    if attn_weights is None:
+        return None
+    if isinstance(mask, np.ndarray):
+        mask_tensor = torch.from_numpy(mask)
+    else:
+        mask_tensor = mask
+    if target_hw is not None:
+        target_h, target_w = target_hw
+        h, w = mask_tensor.shape[-2:]
+        if h < target_h or w < target_w:
+            pad_h = target_h - h
+            pad_w = target_w - w
+            mask_tensor = torch.nn.functional.pad(mask_tensor, (0, pad_w, 0, pad_h))
+        if mask_tensor.shape[-2:] != (target_h, target_w):
+            mask_tensor = mask_tensor[:target_h, :target_w]
+    mask_tensor = mask_tensor.to(attn_weights.device)
+    if mask_tensor.numel() == 0:
+        return None
+    mask_tensor = (mask_tensor > 0).flatten()
+    if mask_tensor.sum() == 0:
+        return None
+
+    if attn_weights.dim() == 3:
+        attn_flat = attn_weights
+    else:
+        attn_flat = attn_weights.view(attn_weights.shape[0], -1).unsqueeze(0)
+
+    valid_indices = torch.nonzero(mask_tensor, as_tuple=False).squeeze(1)
+    if valid_indices.numel() == 0:
+        return None
+    if valid_indices.numel() > sample_points:
+        perm = torch.randperm(valid_indices.numel(), device=valid_indices.device)[:sample_points]
+        valid_indices = valid_indices[perm]
+
+    weights = attn_flat[0, :, valid_indices].transpose(0, 1)
+    weights = torch.clamp(weights, min=eps)
+    entropy = -(weights * torch.log(weights)).sum(dim=1)
+    return entropy.mean().item()
+
+
+class EntropyStopper:
+    def __init__(self, w=20, k=2.0, T=3):
+        self.window = w
+        self.z_threshold = k
+        self.abnormal_target = T
+        self.history = deque(maxlen=w)
+        self.abnormal_count = 0
+
+    def update(self, entropy_value):
+        if entropy_value is None:
+            return False, 0.0, self.abnormal_count
+        if len(self.history) < self.window:
+            self.history.append(entropy_value)
+            return False, 0.0, self.abnormal_count
+        history_arr = torch.tensor(list(self.history), dtype=torch.float32)
+        mu = history_arr.mean().item()
+        sigma = history_arr.std(unbiased=False).item()
+        z = (entropy_value - mu) / (sigma + 1e-6)
+        if z > self.z_threshold:
+            self.abnormal_count += 1
+        else:
+            self.abnormal_count = 0
+        self.history.append(entropy_value)
+        stop = self.abnormal_count >= self.abnormal_target
+        return stop, z, self.abnormal_count
 
 def compute_circularity(mask):
     area = mask.sum()
