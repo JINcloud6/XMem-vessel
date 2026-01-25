@@ -13,6 +13,7 @@ class MemoryManager:
         self.hidden_dim = config['hidden_dim']
         self.top_k = config['top_k']
         self.temporal_decay = config.get('temporal_decay', 0)
+        self.temporal_decay_mode = config.get('temporal_decay_mode', 'exp')
         self.enable_attention_entropy = config.get('enable_attention_entropy', False)
 
         self.enable_long_term = config['enable_long_term']
@@ -44,6 +45,7 @@ class MemoryManager:
         self.hidden_dim = config['hidden_dim']
         self.top_k = config['top_k']
         self.temporal_decay = config.get('temporal_decay', 0)
+        self.temporal_decay_mode = config.get('temporal_decay_mode', 'exp')
         self.enable_attention_entropy = config.get('enable_attention_entropy', False)
 
         assert self.enable_long_term == config['enable_long_term'], 'cannot update this'
@@ -66,7 +68,10 @@ class MemoryManager:
         if memory_time is None or curr_ti is None:
             return similarity
         dist = (curr_ti - memory_time).abs()
-        weight = torch.exp(-dist / self.temporal_decay)
+        if self.temporal_decay_mode == 'linear':
+            weight = (1.0 - dist / self.temporal_decay).clamp_min(0.0)
+        else:
+            weight = torch.exp(-dist / self.temporal_decay)
         log_weight = torch.log(weight.clamp_min(1e-6)).transpose(1, 2)
         return similarity + log_weight
 
