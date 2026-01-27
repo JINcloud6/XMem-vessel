@@ -15,6 +15,7 @@ class MemoryManager:
         self.temporal_decay = config.get('temporal_decay', 0)
         self.temporal_decay_mode = config.get('temporal_decay_mode', 'exp')
         self.enable_attention_entropy = config.get('enable_attention_entropy', False)
+        self.drop_first_memory = config.get('drop_first_memory', False)
 
         self.enable_long_term = config['enable_long_term']
         self.enable_long_term_usage = config['enable_long_term_count_usage']
@@ -47,6 +48,7 @@ class MemoryManager:
         self.temporal_decay = config.get('temporal_decay', 0)
         self.temporal_decay_mode = config.get('temporal_decay_mode', 'exp')
         self.enable_attention_entropy = config.get('enable_attention_entropy', False)
+        self.drop_first_memory = config.get('drop_first_memory', False)
 
         assert self.enable_long_term == config['enable_long_term'], 'cannot update this'
         assert self.enable_long_term_usage == config['enable_long_term_count_usage'], 'cannot update this'
@@ -225,6 +227,8 @@ class MemoryManager:
             selection = selection.flatten(start_dim=2)
 
         self.work_mem.add(key, value, shrinkage, selection, objects, timestamps=timestamps)
+        if self.drop_first_memory and curr_ti is not None and curr_ti > 0 and self.work_mem.size > self.HW:
+            self.work_mem.sieve_by_range(0, self.HW, min_size=0)
 
         # long-term memory cleanup
         if self.enable_long_term:

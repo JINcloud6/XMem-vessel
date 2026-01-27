@@ -39,6 +39,8 @@ def main():
                         help="Comma-separated top-k values for memory matching")
     parser.add_argument("--mem_every", default="5,10",
                         help="Comma-separated memory write intervals")
+    parser.add_argument("--drop_first_memory", default="off,on",
+                        help="Comma-separated drop-first-memory enable: off,on")
     parser.add_argument("--output_dir", default="./bv_seg_output",
                         help="Output directory for segmentation results")
     parser.add_argument("--log_dir", default="tracking_feature_logs",
@@ -61,6 +63,7 @@ def main():
     num_prototypes = parse_list(args.num_prototypes, cast=int)
     top_ks = parse_list(args.top_ks, cast=int)
     mem_every_vals = parse_list(args.mem_every, cast=int)
+    drop_first_memory = parse_list(args.drop_first_memory, cast=str)
     entropy_enable = args.entropy_enable == "on"
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -86,48 +89,51 @@ def main():
                                         for proto in num_prototypes:
                                             for top_k in top_ks:
                                                 for mem_every in mem_every_vals:
-                                                    decay_enabled = decay_mode != "off"
-                                                    xmem_config["enable_temporal_decay"] = decay_enabled
-                                                    xmem_config["temporal_decay_mode"] = decay_mode
-                                                    if not decay_enabled:
-                                                        xmem_config["temporal_decay"] = 0.0
-                                                    else:
-                                                        xmem_config["temporal_decay"] = float(decay_value)
-                                                    xmem_config["enable_entropy_stop"] = entropy_enable
-                                                    xmem_config["enable_attention_entropy"] = entropy_enable
-                                                    xmem_config["entropy_window"] = ew
-                                                    xmem_config["entropy_z_threshold"] = ez
-                                                    xmem_config["entropy_abnormal_count"] = ec
-                                                    xmem_config["enable_split_seeding"] = (split_flag == "on")
-                                                    xmem_config["enable_long_term"] = (lt_flag == "on")
-                                                    xmem_config["max_mid_term_frames"] = max_mid
-                                                    xmem_config["min_mid_term_frames"] = min_mid
-                                                    xmem_config["num_prototypes"] = proto
-                                                    xmem_config["top_k"] = top_k
-                                                    xmem_config["mem_every"] = mem_every
-                                                    tag = (
-                                                        f"decay-{decay_mode}{decay_value}_"
-                                                        f"ent-w{ew}_z{ez}_c{ec}_"
-                                                        f"split-{split_flag}_"
-                                                        f"lt-{lt_flag}_"
-                                                        f"maxmid-{max_mid}_minmid-{min_mid}_"
-                                                        f"proto-{proto}_topk-{top_k}_"
-                                                        f"memevery-{mem_every}"
-                                                    )
-                                                    log_path = os.path.join(args.log_dir, f"{tag}.log")
-                                                    output_name = f"{args.output_prefix}_{tag}.nii.gz"
-                                                    print(f"[Validate] {tag} log={log_path}")
-                                                    if args.dry_run:
-                                                        continue
-                                                    base_args = _strip_arg(list(remaining), "--output_filename")
-                                                    base_args = _strip_arg(base_args, "--output_dir")
-                                                    sys.argv = [sys.argv[0]] + base_args + [
-                                                        "--output_dir", args.output_dir,
-                                                        "--output_filename", output_name,
-                                                    ]
-                                                    with open(log_path, "w", encoding="utf-8") as log_file:
-                                                        with redirect_stdout(log_file), redirect_stderr(log_file):
-                                                            run_segmentation()
+                                                    for drop_flag in drop_first_memory:
+                                                        decay_enabled = decay_mode != "off"
+                                                        xmem_config["enable_temporal_decay"] = decay_enabled
+                                                        xmem_config["temporal_decay_mode"] = decay_mode
+                                                        if not decay_enabled:
+                                                            xmem_config["temporal_decay"] = 0.0
+                                                        else:
+                                                            xmem_config["temporal_decay"] = float(decay_value)
+                                                        xmem_config["enable_entropy_stop"] = entropy_enable
+                                                        xmem_config["enable_attention_entropy"] = entropy_enable
+                                                        xmem_config["entropy_window"] = ew
+                                                        xmem_config["entropy_z_threshold"] = ez
+                                                        xmem_config["entropy_abnormal_count"] = ec
+                                                        xmem_config["enable_split_seeding"] = (split_flag == "on")
+                                                        xmem_config["enable_long_term"] = (lt_flag == "on")
+                                                        xmem_config["max_mid_term_frames"] = max_mid
+                                                        xmem_config["min_mid_term_frames"] = min_mid
+                                                        xmem_config["num_prototypes"] = proto
+                                                        xmem_config["top_k"] = top_k
+                                                        xmem_config["mem_every"] = mem_every
+                                                        xmem_config["drop_first_memory"] = (drop_flag == "on")
+                                                        tag = (
+                                                            f"decay-{decay_mode}{decay_value}_"
+                                                            f"ent-w{ew}_z{ez}_c{ec}_"
+                                                            f"split-{split_flag}_"
+                                                            f"lt-{lt_flag}_"
+                                                            f"maxmid-{max_mid}_minmid-{min_mid}_"
+                                                            f"proto-{proto}_topk-{top_k}_"
+                                                            f"memevery-{mem_every}_"
+                                                            f"dropfirst-{drop_flag}"
+                                                        )
+                                                        log_path = os.path.join(args.log_dir, f"{tag}.log")
+                                                        output_name = f"{args.output_prefix}_{tag}.nii.gz"
+                                                        print(f"[Validate] {tag} log={log_path}")
+                                                        if args.dry_run:
+                                                            continue
+                                                        base_args = _strip_arg(list(remaining), "--output_filename")
+                                                        base_args = _strip_arg(base_args, "--output_dir")
+                                                        sys.argv = [sys.argv[0]] + base_args + [
+                                                            "--output_dir", args.output_dir,
+                                                            "--output_filename", output_name,
+                                                        ]
+                                                        with open(log_path, "w", encoding="utf-8") as log_file:
+                                                            with redirect_stdout(log_file), redirect_stderr(log_file):
+                                                                run_segmentation()
 
 
 if __name__ == "__main__":
