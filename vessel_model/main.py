@@ -49,6 +49,7 @@ def run_segmentation():
     enable_entropy_stop = xmem_config.get('enable_entropy_stop', False)
     global_mem_select_method = xmem_config.get('global_mem_select_method', 'all')
     global_mem_topk = xmem_config.get('global_mem_topk', 0)
+    global_mem_debug = xmem_config.get('global_mem_debug', False)
     split_min_area = xmem_config.get('split_min_area', 200)
     split_min_distance = xmem_config.get('split_min_distance', 15)
     split_max_new_seeds = xmem_config.get('split_max_new_seeds', 2)
@@ -231,20 +232,46 @@ def run_segmentation():
         if global_mem is None or not global_mem.engaged():
             return None
         if method == 'all' or k <= 0 or global_mem.size <= k:
+            if global_mem_debug:
+                print(
+                    f"[GlobalMemDebug] method={method} k={k} size={global_mem.size} "
+                    f"curr_idx={curr_idx} -> select=all"
+                )
             return global_mem.key, global_mem.value[0], global_mem.shrinkage, global_mem.selection, global_mem.time
         if method == 'nearest':
             if global_mem.time is None or curr_idx is None:
+                if global_mem_debug:
+                    print(
+                        f"[GlobalMemDebug] method=nearest k={k} size={global_mem.size} "
+                        f"curr_idx={curr_idx} time=None -> select=all"
+                    )
                 return global_mem.key, global_mem.value[0], global_mem.shrinkage, global_mem.selection, global_mem.time
             dist = (global_mem.time - float(curr_idx)).abs().view(-1)
             _, indices = torch.topk(dist, k=k, largest=False)
+            if global_mem_debug:
+                print(
+                    f"[GlobalMemDebug] method=nearest k={k} size={global_mem.size} "
+                    f"curr_idx={curr_idx} selected={indices[:10].tolist()}"
+                )
             return _slice_global_memory(global_mem, indices)
         if method == 'similarity':
             if query_key is None:
+                if global_mem_debug:
+                    print(
+                        f"[GlobalMemDebug] method=similarity k={k} size={global_mem.size} "
+                        f"curr_idx={curr_idx} query=None -> select=all"
+                    )
                 return global_mem.key, global_mem.value[0], global_mem.shrinkage, global_mem.selection, global_mem.time
             query_key_flat = query_key.flatten(start_dim=2)
             similarity = get_similarity(global_mem.key, global_mem.shrinkage, query_key_flat, None)
             score = similarity.mean(dim=2).squeeze(0)
             _, indices = torch.topk(score, k=k, largest=True)
+            if global_mem_debug:
+                print(
+                    f"[GlobalMemDebug] method=similarity k={k} size={global_mem.size} "
+                    f"curr_idx={curr_idx} score_min={score.min().item():.4f} "
+                    f"score_max={score.max().item():.4f} selected={indices[:10].tolist()}"
+                )
             return _slice_global_memory(global_mem, indices)
         return global_mem.key, global_mem.value[0], global_mem.shrinkage, global_mem.selection, global_mem.time
 

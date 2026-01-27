@@ -44,6 +44,7 @@ xmem_config = {
     'enable_global_memory': True,
     'global_mem_select_method': 'all',
     'global_mem_topk': 200,
+    'global_mem_debug': False,
     'enable_split_seeding': False,
     'split_min_area': 200,
     'split_min_distance': 15,
