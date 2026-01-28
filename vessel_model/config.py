@@ -11,6 +11,7 @@ def get_args():
     parser.add_argument('--dataset_key', default='main', help='Key name in h5 file')
     parser.add_argument('--gpu_id', default='0', help='指定使用的GPU ID')
     parser.add_argument('--output_filename', default='segmentation.nii.gz', help='输出文件名')
+    parser.add_argument('--seed_file', default=None, help='Optional path to seed list (z,y,x per line)')
 
     # Seed Generation Params
     parser.add_argument('--axis', type=int, default=3, help='Axis to generate init seg (0=Z, 1=Y, 2=X),3 is use all')

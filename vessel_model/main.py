@@ -71,42 +71,48 @@ def run_segmentation():
     print(f"Loading volume from {args.volume_path}...")
     vol_man = VolumeManager(args.volume_path, key=args.dataset_key, crop_size=args.crop_size, need_transpose=args.need_transpose)
     
-    # 2. Get Init Seg (The "Map")
-    init_seg_name = f"init_seg_axis{args.axis}_s{args.stride}_t{args.remove_portion}.h5"
-    init_seg_path = os.path.join(args.output_dir, init_seg_name)
-    
-    if os.path.exists(init_seg_path):
-        print(f"Loading existing init_seg from {init_seg_path}...")
-        with h5py.File(init_seg_path, 'r') as f:
-            init_seg = f['main'][:]
+    # 2. Get Seeds
+    seeds = []
+    if args.seed_file:
+        print(f"Loading seeds from {args.seed_file}...")
+        with open(args.seed_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = [int(v) for v in line.replace(",", " ").split()]
+                if len(parts) != 3:
+                    raise ValueError(f"Invalid seed line: {line}")
+                seeds.append(tuple(parts))
     else:
-        # init_seg = get_init_seg(
-        #     vol_man.vol, 
-        #     axis=args.axis, 
-        #     stride=args.stride, 
-        #     thr=args.remove_portion,
-        #     gaussian_kernel=args.gaussian_kernel,
-        #     min_bright=args.min_bright
-        # )
-        init_seg = get_multi_axis_init_seg(
-            vol_man.vol, 
-            stride=args.stride, 
-            thr=args.remove_portion,
-            gaussian_kernel=args.gaussian_kernel,
-            min_bright=args.min_bright
-            # ... 其他参数
-        )
-        print(f"Saving init_seg to {init_seg_path}...")
-        with h5py.File(init_seg_path, 'w') as f:
-            f.create_dataset('main', data=init_seg, compression='gzip')
-        # 生成合并了三个轴向的初始分割图
+        # Get Init Seg (The "Map")
+        init_seg_name = f"init_seg_axis{args.axis}_s{args.stride}_t{args.remove_portion}.h5"
+        init_seg_path = os.path.join(args.output_dir, init_seg_name)
         
+        if os.path.exists(init_seg_path):
+            print(f"Loading existing init_seg from {init_seg_path}...")
+            with h5py.File(init_seg_path, 'r') as f:
+                init_seg = f['main'][:]
+        else:
+            init_seg = get_multi_axis_init_seg(
+                vol_man.vol, 
+                stride=args.stride, 
+                thr=args.remove_portion,
+                gaussian_kernel=args.gaussian_kernel,
+                min_bright=args.min_bright
+                # ... 其他参数
+            )
+            print(f"Saving init_seg to {init_seg_path}...")
+            with h5py.File(init_seg_path, 'w') as f:
+                f.create_dataset('main', data=init_seg, compression='gzip')
+            # 生成合并了三个轴向的初始分割图
+            
 
-    # 3. Extract Seeds
-    seeds = get_seeds_from_init_seg(init_seg)
-    if not seeds:
-        print("No seeds found! Check parameters.")
-        return
+        # Extract Seeds
+        seeds = get_seeds_from_init_seg(init_seg)
+        if not seeds:
+            print("No seeds found! Check parameters.")
+            return
 
     # 4. Load Models
     print("Loading Models...")
