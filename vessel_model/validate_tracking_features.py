@@ -13,9 +13,9 @@ def parse_list(value, cast=str):
 
 def main():
     parser = argparse.ArgumentParser(description="Validate decay/entropy/split tracking features.")
-    parser.add_argument("--decay_modes", default="off,exp",
+    parser.add_argument("--decay_modes", default="linear",
                         help="Comma-separated decay modes: off, exp, linear")
-    parser.add_argument("--decay_values", default="2,5,10",
+    parser.add_argument("--decay_values", default="3,4,6,7,8,9",
                         help="Comma-separated decay parameter values (tau or L)")
     parser.add_argument("--entropy_windows", default="20",
                         help="Comma-separated entropy window sizes")
@@ -23,23 +23,23 @@ def main():
                         help="Comma-separated entropy Z thresholds")
     parser.add_argument("--entropy_counts", default="3",
                         help="Comma-separated entropy abnormal counts")
-    parser.add_argument("--entropy_enable", default="on",
+    parser.add_argument("--entropy_enable", default="off",
                         help="Enable entropy stop: on or off")
-    parser.add_argument("--split_enable", default="off,on",
+    parser.add_argument("--split_enable", default="off",
                         help="Comma-separated split seeding enable: off,on")
-    parser.add_argument("--longterm_enable", default="off,on",
+    parser.add_argument("--longterm_enable", default="on",
                         help="Comma-separated long-term memory enable: off,on")
-    parser.add_argument("--max_mid_frames", default="10,20",
+    parser.add_argument("--max_mid_frames", default="10",
                         help="Comma-separated max mid-term frames")
-    parser.add_argument("--min_mid_frames", default="5,10",
+    parser.add_argument("--min_mid_frames", default="5",
                         help="Comma-separated min mid-term frames")
-    parser.add_argument("--num_prototypes", default="64,128",
+    parser.add_argument("--num_prototypes", default="128",
                         help="Comma-separated prototype counts")
-    parser.add_argument("--top_ks", default="20,30",
+    parser.add_argument("--top_ks", default="30",
                         help="Comma-separated top-k values for memory matching")
-    parser.add_argument("--mem_every", default="5,10",
+    parser.add_argument("--mem_every", default="5",
                         help="Comma-separated memory write intervals")
-    parser.add_argument("--drop_first_memory", default="off,on",
+    parser.add_argument("--drop_first_memory", default="off",
                         help="Comma-separated drop-first-memory enable: off,on")
     parser.add_argument("--output_dir", default="./bv_seg_output",
                         help="Output directory for segmentation results")

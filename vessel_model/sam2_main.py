@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from scipy import ndimage
 from tqdm import tqdm
-
+import hydra
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 
@@ -16,8 +16,8 @@ from .utils import select_masks
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--sam2_checkpoint", required=True, help="Path to SAM2 checkpoint")
-    parser.add_argument("--sam2_model_cfg", required=True, help="Path to SAM2 model config")
+    parser.add_argument("--sam2_checkpoint", required=True, help="Path to SAM2 checkpoint",default="/home/jiangshuai/code/sam2/checkpoints/sam2.1_hiera_large.pt")
+    parser.add_argument("--sam2_model_cfg", required=True, help="Path to SAM2 model config",default="/home/jiangshuai/code/sam2/sam2.1_hiera_l.yaml")
     parser.add_argument("--volume_path", required=True, help="Path to .h5 or .nii/.nii.gz file")
     parser.add_argument("--output_dir", default="./bv_seg_output", help="Directory to save outputs")
     parser.add_argument("--output_filename", default="segmentation.nii.gz", help="Output filename")
@@ -147,6 +147,9 @@ def run_segmentation():
     device = torch.device(args.device)
 
     vol_man = VolumeManager(args.volume_path, key=args.dataset_key)
+    hydra.core.global_hydra.GlobalHydra.instance().clear()
+# reinit hydra with a new search path for configs
+    hydra.initialize_config_module('use_sam2', version_base='1.2')
     sam2 = build_sam2(args.sam2_model_cfg, args.sam2_checkpoint, device=device)
     predictor = SAM2ImagePredictor(sam2)
 
@@ -289,7 +292,7 @@ def run_segmentation():
                     prev_components = _extract_components(pred)
 
     print("Cleanup...")
-    vol_man.clean_up()
+    # vol_man.clean_up()
     file_name = args.output_filename
     final_path = os.path.join(args.output_dir, file_name)
     need_transpose = args.need_transpose

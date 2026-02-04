@@ -278,7 +278,7 @@ def run_segmentation():
                 point_labels=np.array([1]),
                 multimask_output=True,
             )
-            cand_mask, _ = select_masks(masks, scores, thr=0.9, crit='max', max_size=5000, min_circularity=0.6)
+            cand_mask, _ = select_masks(masks, scores, thr=0.0, crit='max', max_size=5000, min_circularity=0.0)
             if cand_mask is None:
                 continue
             overlap = (cand_mask & (existing > 0)).sum()
@@ -379,7 +379,7 @@ def run_segmentation():
                     multimask_output=True
                 )
                 
-                mask, score = select_masks(masks, scores, thr=0.9, crit='max', max_size=5000,min_circularity=0.6)
+                mask, score = select_masks(masks, scores, thr=0.9, crit='max', max_size=5000,min_circularity=0.0)
                 
                 if mask is not None:
                     area = mask.sum()
@@ -576,7 +576,7 @@ def run_segmentation():
                 del processor
 
     print('Cleanup...')
-    vol_man.clean_up() # 可选，根据需要取消注释
+    # vol_man.clean_up() # 可选，根据需要取消注释
 
     # 6. Save Final
     file_name = args.output_filename

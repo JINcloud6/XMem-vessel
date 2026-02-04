@@ -4,8 +4,11 @@ saves/
 output/
 .vscode/
 workspace/
+data/
+tracking_feature_logs
 run*.sh
 .DS_Store
+data
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
