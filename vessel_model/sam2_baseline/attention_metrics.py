@@ -1,7 +1,12 @@
 import torch
 
 
-def sample_query_metrics_from_attn(attn_bhqs: torch.Tensor, num_ptr: int, max_q: int = 512):
+def sample_query_metrics_from_attn(
+    attn_bhqs: torch.Tensor,
+    num_ptr: int,
+    max_q: int = 512,
+    query_mask: torch.Tensor | None = None,
+):
     """
     attn_bhqs: [B,H,Sq,Sk] (CPU tensor ok)
     Return: entropy/top1/ptrmass samples arrays (len<=max_q)
@@ -20,6 +25,15 @@ def sample_query_metrics_from_attn(attn_bhqs: torch.Tensor, num_ptr: int, max_q:
         ptr_q = p[:, -num_ptr:].sum(dim=-1)  # [Sq]
     else:
         ptr_q = torch.zeros_like(ent_q)
+
+    if query_mask is not None:
+        query_mask = query_mask.to(ent_q.device).bool().flatten()
+        if query_mask.numel() == ent_q.numel():
+            keep_idx = torch.nonzero(query_mask, as_tuple=False).flatten()
+            if keep_idx.numel() > 0:
+                ent_q = ent_q[keep_idx]
+                top1_q = top1_q[keep_idx]
+                ptr_q = ptr_q[keep_idx]
 
     sq = ent_q.numel()
     if sq > max_q:

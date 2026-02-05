@@ -4,6 +4,7 @@ import tempfile
 
 import numpy as np
 import torch
+from PIL import Image
 
 from .attention_metrics import (
     mean_attn_entropy,
@@ -13,7 +14,7 @@ from .attention_metrics import (
 )
 from .drift_metrics import gap_iou_from_resegment
 from .image_utils import get_slice, to_uint8_rgb, write_jpeg_frames
-from .plotting import plot_time_value_heatmap
+from .plotting import plot_spatial_heatmap, plot_time_value_heatmap
 
 
 def vos_track_one_direction(
@@ -58,6 +59,9 @@ def vos_track_one_direction(
     ptr_samples_per_frame = []
     gap_iou_curve = []
     gap_iou_samples = []
+    ptr_heat_sum = None
+    ptr_heat_count = 0
+    base_frame = frames_rgb[0] if frames_rgb else None
 
     try:
         with torch.inference_mode(), torch.autocast(str(vol_man.device), dtype=torch.bfloat16):
@@ -105,15 +109,29 @@ def vos_track_one_direction(
                     ptr_curve.append(mean_pointer_mass(attn, getattr(rope_attn, "last_num_k_exclude_rope", 0)))
 
                 num_ptr = int(getattr(rope_attn, "last_num_k_exclude_rope", 0))
+                query_mask = _make_query_mask(attn, mm)
                 if attn is None:
                     ent_samples_per_frame.append(None)
                     top1_samples_per_frame.append(None)
                     ptr_samples_per_frame.append(None)
                 else:
-                    ent_s, top1_s, ptr_s = sample_query_metrics_from_attn(attn, num_ptr=num_ptr, max_q=512)
+                    ent_s, top1_s, ptr_s = sample_query_metrics_from_attn(
+                        attn,
+                        num_ptr=num_ptr,
+                        max_q=512,
+                        query_mask=query_mask,
+                    )
                     ent_samples_per_frame.append(ent_s)
                     top1_samples_per_frame.append(top1_s)
                     ptr_samples_per_frame.append(ptr_s)
+
+                ptr_map = _memory_pointer_heatmap(attn, num_ptr)
+                if ptr_map is not None:
+                    if ptr_heat_sum is None:
+                        ptr_heat_sum = ptr_map.astype(np.float32)
+                    else:
+                        ptr_heat_sum += ptr_map.astype(np.float32)
+                    ptr_heat_count += 1
 
                 if img_predictor is None:
                     gap_iou_curve.append(np.nan)
@@ -178,6 +196,18 @@ def vos_track_one_direction(
             val_range=(0.0, 1.0),
         )
 
+        if ptr_heat_sum is not None and ptr_heat_count > 0:
+            mean_ptr_heat = ptr_heat_sum / float(ptr_heat_count)
+            plot_spatial_heatmap(
+                mean_ptr_heat,
+                savepath=os.path.join(out_dir, f"{log_prefix}_memory_ptr_heat.png"),
+            )
+            plot_spatial_heatmap(
+                mean_ptr_heat,
+                savepath=os.path.join(out_dir, f"{log_prefix}_memory_ptr_overlay.png"),
+                base_image=base_frame,
+            )
+
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
@@ -193,3 +223,30 @@ def _plot_curve(values, label, log_prefix, out_dir):
     safe_label = label.replace(" ", "_").replace("/", "_")
     plt.savefig(os.path.join(out_dir, f"{log_prefix}_{safe_label}.png"), dpi=200)
     plt.close()
+
+
+def _make_query_mask(attn, mask_2d):
+    if attn is None or mask_2d is None:
+        return None
+    sq = int(attn.shape[-2])
+    side = int(np.sqrt(sq))
+    if side * side != sq:
+        return None
+    mask = (mask_2d > 0).astype(np.uint8) * 255
+    mask_img = Image.fromarray(mask)
+    mask_resized = mask_img.resize((side, side), resample=Image.NEAREST)
+    mask_arr = np.asarray(mask_resized) > 0
+    return torch.from_numpy(mask_arr.astype(np.bool_))
+
+
+def _memory_pointer_heatmap(attn, num_ptr):
+    if attn is None or num_ptr <= 0:
+        return None
+    sq = int(attn.shape[-2])
+    side = int(np.sqrt(sq))
+    if side * side != sq:
+        return None
+    p = attn.mean(dim=1)[0]  # [Sq,Sk]
+    ptr_mass = p[:, -num_ptr:].sum(dim=-1)  # [Sq]
+    ptr_mass = ptr_mass.detach().cpu().numpy().reshape(side, side)
+    return ptr_mass

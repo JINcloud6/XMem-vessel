@@ -65,3 +65,28 @@ def plot_time_value_heatmap(
     plt.tight_layout()
     plt.savefig(savepath, dpi=200)
     plt.close()
+
+
+def plot_spatial_heatmap(heatmap, savepath, base_image=None, alpha=0.45, cmap="magma"):
+    if heatmap is None:
+        return
+    hm = np.asarray(heatmap, dtype=np.float32)
+    if hm.ndim != 2:
+        return
+
+    hm_min, hm_max = float(np.min(hm)), float(np.max(hm))
+    if hm_max <= hm_min + 1e-6:
+        hm = np.zeros_like(hm, dtype=np.float32)
+    else:
+        hm = (hm - hm_min) / (hm_max - hm_min + 1e-6)
+
+    plt.figure(figsize=(6, 5))
+    if base_image is not None:
+        plt.imshow(base_image, cmap="gray")
+        plt.imshow(hm, cmap=cmap, alpha=alpha)
+    else:
+        plt.imshow(hm, cmap=cmap)
+    plt.axis("off")
+    plt.tight_layout()
+    plt.savefig(savepath, dpi=200)
+    plt.close()
