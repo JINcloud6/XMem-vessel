@@ -3,8 +3,8 @@ import argparse
 def get_args():
     parser = argparse.ArgumentParser()
     # Paths
-    parser.add_argument('--xmem_checkpoint', default='./saves/XMem.pth')
-    parser.add_argument('--sam_checkpoint', default='./saves/sam_vit_h_4b8939.pth')
+    parser.add_argument('--xmem_checkpoint', default='/home/jiangshuai/code/XMem/saves/XMem.pth')
+    parser.add_argument('--sam_checkpoint', default='/home/jiangshuai/code/XMem/saves/sam_vit_h_4b8939.pth')
     parser.add_argument('--sam_type', default='vit_h')
     parser.add_argument('--volume_path', required=True, help='Path to .h5 file')
     parser.add_argument('--output_dir', default='./bv_seg_output', help='Directory to save outputs')
@@ -28,7 +28,7 @@ def get_args():
 
 # XMem Configuration
 xmem_config = {
-    'enable_long_term': False,
+    'enable_long_term': True,
     'enable_long_term_count_usage': True,
     'max_mid_term_frames': 10,
     'min_mid_term_frames': 5,
@@ -40,9 +40,9 @@ xmem_config = {
     'save_scores': False,
     'temporal_decay': 5.0,
     'temporal_decay_mode': 'exp',
-    'global_mem_max_elements': 500000,
+    'global_mem_max_elements': 10000,
     'enable_temporal_decay': True,
-    'enable_global_memory': True,
+    'enable_global_memory': False,
     'global_mem_select_method': 'all',
     'global_mem_topk': 200,
     'global_mem_debug': False,

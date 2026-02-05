@@ -13,9 +13,9 @@ def parse_list(value, cast=str):
 
 def main():
     parser = argparse.ArgumentParser(description="Validate global memory injection strategies.")
-    parser.add_argument("--methods", default="all,nearest,similarity",
+    parser.add_argument("--methods", default="similarity",
                         help="Comma-separated methods: all, nearest, similarity")
-    parser.add_argument("--ks", default="50,100,200",
+    parser.add_argument("--ks", default="150,200,400,1000,2000",
                         help="Comma-separated top-k values")
     parser.add_argument("--output_dir", default="./bv_seg_output",
                         help="Output directory for segmentation results")

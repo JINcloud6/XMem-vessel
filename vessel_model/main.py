@@ -226,6 +226,70 @@ def run_segmentation():
                 new_seeds.append(new_seed)
         return new_seeds
 
+    def _extract_components(binary_mask):
+        labeled, num = ndimage.label(binary_mask > 0)
+        components = []
+        if num == 0:
+            return components
+        for label_id in range(1, num + 1):
+            comp_mask = labeled == label_id
+            area = int(comp_mask.sum())
+            if area == 0:
+                continue
+            cy, cx = ndimage.center_of_mass(comp_mask)
+            if np.isnan(cy) or np.isnan(cx):
+                continue
+            components.append(
+                {
+                    "mask": comp_mask,
+                    "center": (float(cy), float(cx)),
+                    "area": area,
+                }
+            )
+        return components
+
+    def _recover_missing_components(prev_components, curr_mask, slice_image, axis, curr_idx, box):
+        if not prev_components:
+            return None
+        if curr_mask is None:
+            curr_mask = np.zeros_like(prev_components[0]["mask"], dtype=np.uint8)
+        missing = []
+        for comp in prev_components:
+            if (curr_mask > 0).any() and (curr_mask & comp["mask"]).any():
+                continue
+            missing.append(comp)
+        if not missing:
+            return None
+        img = np.stack([slice_image] * 3, axis=-1)
+        sam_predictor.set_image(img)
+        recovered = np.zeros_like(curr_mask, dtype=np.uint8)
+        if axis == 0:
+            existing = vol_man.global_mask[curr_idx, box[1]:box[2], box[3]:box[4]]
+        elif axis == 1:
+            existing = vol_man.global_mask[box[1]:box[2], curr_idx, box[3]:box[4]]
+        else:
+            existing = vol_man.global_mask[box[1]:box[2], box[3]:box[4], curr_idx]
+        for comp in missing:
+            cy, cx = comp["center"]
+            cy_i = int(round(cy))
+            cx_i = int(round(cx))
+            masks, scores, _ = sam_predictor.predict(
+                point_coords=np.array([[cx_i, cy_i]]),
+                point_labels=np.array([1]),
+                multimask_output=True,
+            )
+            cand_mask, _ = select_masks(masks, scores, thr=0.0, crit='max', max_size=5000, min_circularity=0.0)
+            if cand_mask is None:
+                continue
+            overlap = (cand_mask & (existing > 0)).sum()
+            ratio = overlap / (cand_mask.sum() + 1e-6)
+            if ratio > entropy_overlap_threshold:
+                continue
+            recovered = np.logical_or(recovered, cand_mask)
+        if recovered.sum() == 0:
+            return None
+        return recovered.astype(np.uint8)
+
     def _slice_global_memory(global_mem, indices):
         key = global_mem.key.index_select(-1, indices)
         shrinkage = global_mem.shrinkage.index_select(-1, indices) if global_mem.shrinkage is not None else None
@@ -315,7 +379,7 @@ def run_segmentation():
                     multimask_output=True
                 )
                 
-                mask, score = select_masks(masks, scores, thr=0.9, crit='max', max_size=5000,min_circularity=0.6)
+                mask, score = select_masks(masks, scores, thr=0.9, crit='max', max_size=5000,min_circularity=0.0)
                 
                 if mask is not None:
                     area = mask.sum()
@@ -353,6 +417,7 @@ def run_segmentation():
                 stop_triggered = False
                 stop_info = None
                 stop_state = None
+                prev_components = None
                 for curr_idx in seq:
                     # Dynamic slicing
                     if best_axis==0: sl = vol_man.vol[curr_idx, box[1]:box[2], box[3]:box[4]]
@@ -431,8 +496,17 @@ def run_segmentation():
                                         "stop_slice_index": curr_idx,
                                         "stop_reason": "high_entropy",
                                         "entropy_value": entropy_value,
-                                        "z_value": z_value,
-                                    }
+                                    "z_value": z_value,
+                                }
+
+                    if not stop_triggered and prev_components:
+                        recovered = _recover_missing_components(prev_components, pred, sl, best_axis, curr_idx, box)
+                        if recovered is not None:
+                            combined = ((pred > 0) | (recovered > 0)).astype(np.uint8)
+                            with torch.no_grad():
+                                msk_recover = torch.from_numpy(combined).long().to(args.device).unsqueeze(0)
+                                prob = processor.step(rgb, msk_recover, valid_labels=[1])
+                                pred = torch.argmax(prob, dim=0).cpu().numpy().astype(np.uint8)
 
                     if enable_global_memory and (msk is not None) and (not global_added):
                         latest = processor.memory.get_latest_work_memory()
@@ -491,6 +565,7 @@ def run_segmentation():
                     
                     if pred.sum() > 0:
                         vol_man.update_global_mask(pred, best_axis, (curr_idx, *box[1:]))
+                        prev_components = _extract_components(pred)
                     else:
                         break
                 if stop_triggered:
@@ -501,7 +576,7 @@ def run_segmentation():
                 del processor
 
     print('Cleanup...')
-    vol_man.clean_up() # 可选，根据需要取消注释
+    # vol_man.clean_up() # 可选，根据需要取消注释
 
     # 6. Save Final
     file_name = args.output_filename
