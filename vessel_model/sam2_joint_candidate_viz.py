@@ -1,10 +1,13 @@
 import argparse
 import os
+import time
+from contextlib import nullcontext
 
 import hydra
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
@@ -44,6 +47,12 @@ def get_args():
     )
     parser.add_argument("--output_dir", default="./candidate_mask_viz", help="Output directory")
     parser.add_argument("--alpha", type=float, default=0.35, help="Mask overlay alpha")
+    parser.add_argument(
+        "--crop_size",
+        type=int,
+        default=384,
+        help="Crop size around seed on each slice for faster visualization; <=0 means full slice.",
+    )
     parser.add_argument("--device", default="cuda")
     return parser.parse_args()
 
@@ -55,16 +64,29 @@ def parse_seed(seed_text):
     return tuple(parts)
 
 
-def get_slice_rgb_and_box(vol_man, axis, idx):
+def _clamp_crop(center, size, limit):
+    half = size // 2
+    start = max(0, center - half)
+    end = min(limit, center + half)
+    return start, end
+
+
+def get_slice_rgb_and_box(vol_man, axis, idx, seed, crop_size):
     if axis == 0:
-        img = vol_man.vol[idx, :, :]
-        box = (idx, 0, vol_man.shape[1], 0, vol_man.shape[2])
+        y0, y1 = (0, vol_man.shape[1]) if crop_size <= 0 else _clamp_crop(seed[1], crop_size, vol_man.shape[1])
+        x0, x1 = (0, vol_man.shape[2]) if crop_size <= 0 else _clamp_crop(seed[2], crop_size, vol_man.shape[2])
+        img = vol_man.vol[idx, y0:y1, x0:x1]
+        box = (idx, y0, y1, x0, x1)
     elif axis == 1:
-        img = vol_man.vol[:, idx, :]
-        box = (idx, 0, vol_man.shape[0], 0, vol_man.shape[2])
+        z0, z1 = (0, vol_man.shape[0]) if crop_size <= 0 else _clamp_crop(seed[0], crop_size, vol_man.shape[0])
+        x0, x1 = (0, vol_man.shape[2]) if crop_size <= 0 else _clamp_crop(seed[2], crop_size, vol_man.shape[2])
+        img = vol_man.vol[z0:z1, idx, x0:x1]
+        box = (idx, z0, z1, x0, x1)
     else:
-        img = vol_man.vol[:, :, idx]
-        box = (idx, 0, vol_man.shape[0], 0, vol_man.shape[1])
+        z0, z1 = (0, vol_man.shape[0]) if crop_size <= 0 else _clamp_crop(seed[0], crop_size, vol_man.shape[0])
+        y0, y1 = (0, vol_man.shape[1]) if crop_size <= 0 else _clamp_crop(seed[1], crop_size, vol_man.shape[1])
+        img = vol_man.vol[z0:z1, y0:y1, idx]
+        box = (idx, z0, z1, y0, y1)
     return np.stack([img] * 3, axis=-1), box
 
 
@@ -81,13 +103,13 @@ def predict_three_masks(img_predictor, image, local_point):
     return masks.astype(np.uint8), scores
 
 
-def auto_choose_axis(img_predictor, vol_man, seed):
+def auto_choose_axis(img_predictor, vol_man, seed, crop_size):
     best_axis = -1
     best_area = float("inf")
 
     for axis in [0, 1, 2]:
         idx = seed[axis]
-        rgb, box = get_slice_rgb_and_box(vol_man, axis, idx)
+        rgb, box = get_slice_rgb_and_box(vol_man, axis, idx, seed, crop_size)
         local_pt = map_local_point(seed, axis, box)
         masks, _ = predict_three_masks(img_predictor, rgb, local_pt)
         if len(masks) == 0:
@@ -130,6 +152,9 @@ def main():
     seed = parse_seed(args.seed)
     os.makedirs(args.output_dir, exist_ok=True)
 
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        print("CUDA unavailable, fallback to CPU.")
+        args.device = "cpu"
     device = torch.device(args.device)
     vol_man = VolumeManager(args.volume_path, key=args.dataset_key)
 
@@ -139,18 +164,22 @@ def main():
     sam2_img_model = build_sam2(args.sam2_model_cfg, args.sam2_checkpoint, device=device)
     img_predictor = SAM2ImagePredictor(sam2_img_model)
 
-    with torch.inference_mode(), torch.autocast(args.device, dtype=torch.bfloat16):
+    autocast_ctx = torch.autocast("cuda", dtype=torch.bfloat16) if args.device.startswith("cuda") else nullcontext()
+    with torch.inference_mode(), autocast_ctx:
         axis = args.axis
         if axis == -1:
-            axis = auto_choose_axis(img_predictor, vol_man, seed)
+            axis = auto_choose_axis(img_predictor, vol_man, seed, args.crop_size)
             print(f"Auto-selected axis: {axis}")
 
         max_idx = vol_man.shape[axis] - 1
         start = max(0, seed[axis] - args.half_window)
         end = min(max_idx, seed[axis] + args.half_window)
 
-        for idx in range(start, end + 1):
-            rgb, box = get_slice_rgb_and_box(vol_man, axis, idx)
+        idxs = list(range(start, end + 1))
+        print(f"Visualizing {len(idxs)} slices on axis={axis} (crop_size={args.crop_size}).")
+        t0 = time.time()
+        for idx in tqdm(idxs, desc="SAM2 candidate viz"):
+            rgb, box = get_slice_rgb_and_box(vol_man, axis, idx, seed, args.crop_size)
             local_pt = map_local_point(seed, axis, box)
             masks, scores = predict_three_masks(img_predictor, rgb, local_pt)
 
@@ -165,6 +194,7 @@ def main():
                 title=f"axis={axis}, slice={idx}, seed={seed}",
                 alpha=args.alpha,
             )
+        print(f"Elapsed: {time.time() - t0:.2f}s")
 
     print(f"Done. Saved visualizations to: {args.output_dir}")
 
