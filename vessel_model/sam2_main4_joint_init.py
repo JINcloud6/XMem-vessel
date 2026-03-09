@@ -4,6 +4,7 @@ import os
 import shutil
 import tempfile
 
+import h5py
 import hydra
 import numpy as np
 import torch
@@ -30,6 +31,7 @@ def get_args():
     parser.add_argument("--output_filename", default="segmentation.nii.gz")
     parser.add_argument("--dataset_key", default="main")
     parser.add_argument("--seed_file", default=None)
+    parser.add_argument("--init_seg_path", default=None, help="Optional cached init-seg h5 path")
     parser.add_argument("--axis", type=int, default=3)
     parser.add_argument("--stride", type=int, default=5)
     parser.add_argument("--gaussian_kernel", type=int, default=5)
@@ -270,35 +272,47 @@ def run_segmentation():
                     raise ValueError(f"Invalid seed line: {line}")
                 seeds.append(tuple(parts))
     else:
-        if args.axis in (0, 1, 2):
-            axis = args.axis
-            init_seg = np.zeros_like(vol_man.vol, dtype=np.uint8)
-            if axis == 0:
-                for m in tqdm(range(0, vol_man.shape[0], args.stride), desc="Axis 0 (Z)"):
-                    image = vol_man.vol[m, :, :]
-                    temp_seg = get_seg(image, remove_portion=args.remove_portion,
-                                       gaussian_kernel=args.gaussian_kernel, min_bright=args.min_bright)
-                    init_seg[m, :, :][temp_seg > 0] = 1
-            elif axis == 1:
-                for m in tqdm(range(0, vol_man.shape[1], args.stride), desc="Axis 1 (Y)"):
-                    image = vol_man.vol[:, m, :]
-                    temp_seg = get_seg(image, remove_portion=args.remove_portion,
-                                       gaussian_kernel=args.gaussian_kernel, min_bright=args.min_bright)
-                    init_seg[:, m, :][temp_seg > 0] = 1
-            else:
-                for m in tqdm(range(0, vol_man.shape[2], args.stride), desc="Axis 2 (X)"):
-                    image = vol_man.vol[:, :, m]
-                    temp_seg = get_seg(image, remove_portion=args.remove_portion,
-                                       gaussian_kernel=args.gaussian_kernel, min_bright=args.min_bright)
-                    init_seg[:, :, m][temp_seg > 0] = 1
+        default_init_seg_name = f"init_seg_axis{args.axis}_s{args.stride}_t{args.remove_portion}.h5"
+        init_seg_path = args.init_seg_path or os.path.join(args.output_dir, default_init_seg_name)
+
+        if os.path.exists(init_seg_path):
+            print(f"Loading existing init_seg from {init_seg_path}...")
+            with h5py.File(init_seg_path, "r") as f:
+                init_seg = f["main"][:]
         else:
-            init_seg = get_multi_axis_init_seg(
-                vol_man.vol,
-                stride=args.stride,
-                thr=args.remove_portion,
-                gaussian_kernel=args.gaussian_kernel,
-                min_bright=args.min_bright,
-            )
+            if args.axis in (0, 1, 2):
+                axis = args.axis
+                init_seg = np.zeros_like(vol_man.vol, dtype=np.uint8)
+                if axis == 0:
+                    for m in tqdm(range(0, vol_man.shape[0], args.stride), desc="Axis 0 (Z)"):
+                        image = vol_man.vol[m, :, :]
+                        temp_seg = get_seg(image, remove_portion=args.remove_portion,
+                                           gaussian_kernel=args.gaussian_kernel, min_bright=args.min_bright)
+                        init_seg[m, :, :][temp_seg > 0] = 1
+                elif axis == 1:
+                    for m in tqdm(range(0, vol_man.shape[1], args.stride), desc="Axis 1 (Y)"):
+                        image = vol_man.vol[:, m, :]
+                        temp_seg = get_seg(image, remove_portion=args.remove_portion,
+                                           gaussian_kernel=args.gaussian_kernel, min_bright=args.min_bright)
+                        init_seg[:, m, :][temp_seg > 0] = 1
+                else:
+                    for m in tqdm(range(0, vol_man.shape[2], args.stride), desc="Axis 2 (X)"):
+                        image = vol_man.vol[:, :, m]
+                        temp_seg = get_seg(image, remove_portion=args.remove_portion,
+                                           gaussian_kernel=args.gaussian_kernel, min_bright=args.min_bright)
+                        init_seg[:, :, m][temp_seg > 0] = 1
+            else:
+                init_seg = get_multi_axis_init_seg(
+                    vol_man.vol,
+                    stride=args.stride,
+                    thr=args.remove_portion,
+                    gaussian_kernel=args.gaussian_kernel,
+                    min_bright=args.min_bright,
+                )
+            print(f"Saving init_seg to {init_seg_path}...")
+            with h5py.File(init_seg_path, "w") as f:
+                f.create_dataset("main", data=init_seg, compression="gzip")
+
         seeds = get_seeds_from_init_seg(init_seg)
 
     if not seeds:
