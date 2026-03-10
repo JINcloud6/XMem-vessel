@@ -50,6 +50,10 @@ def get_args():
     parser.add_argument("--w_centroid", type=float, default=0.03)
     parser.add_argument("--w_area", type=float, default=0.6)
     parser.add_argument("--empty_mask_penalty", type=float, default=6.0)
+    parser.add_argument("--max_init_mask_area", type=int, default=12000,
+                        help="Skip seed when single-slice init mask area exceeds this")
+    parser.add_argument("--max_joint_avg_area", type=float, default=12000.0,
+                        help="Skip seed when joint-init selected masks average area exceeds this")
 
     parser.add_argument("--vos_offload_video_to_cpu", action="store_true")
     parser.add_argument("--keep_tmp_vos_frames", action="store_true")
@@ -166,7 +170,9 @@ def build_joint_init_masks(img_predictor, vol_man, seed, axis, box, args, rng):
 
     path = dp_best_path(layers, args)
     init_masks = {idxs[t]: layers[t][path[t]]["mask"].astype(np.uint8) for t in range(len(idxs))}
-    return init_masks
+    sel_areas = [int(layers[t][path[t]]["area"]) for t in range(len(idxs))]
+    avg_area = float(np.mean(sel_areas)) if len(sel_areas) > 0 else 0.0
+    return init_masks, avg_area
 
 
 def vos_track_with_multi_init(
@@ -345,16 +351,41 @@ def run_segmentation():
                     )
                     if len(masks) == 0:
                         continue
-                    m = masks[np.argmax(scores)].astype(np.uint8)
-                    area = int(m.sum())
+                    order = np.argsort(scores)[::-1]
+                    picked = None
+                    for j in order:
+                        m = masks[j].astype(np.uint8)
+                        area = int(m.sum())
+                        if area <= 0:
+                            continue
+                        if area > args.max_init_mask_area:
+                            continue
+                        picked = m
+                        break
+                    if picked is None:
+                        # fallback到最高分非空mask，后面统一用阈值跳过seed
+                        for j in order:
+                            m = masks[j].astype(np.uint8)
+                            if int(m.sum()) > 0:
+                                picked = m
+                                break
+                    if picked is None:
+                        continue
+                    area = int(picked.sum())
                     if area < min_area:
-                        min_area, best_axis, best_mask = area, axis, m
+                        min_area, best_axis, best_mask = area, axis, picked
 
             if best_axis == -1 or best_mask is None or best_mask.sum() == 0:
                 continue
+            if int(best_mask.sum()) > args.max_init_mask_area:
+                print(f"Skip seed {seed}: init mask area {int(best_mask.sum())} > {args.max_init_mask_area}")
+                continue
 
             _, box = crops[best_axis]
-            init_masks = build_joint_init_masks(img_predictor, vol_man, seed, best_axis, box, args, rng)
+            init_masks, avg_joint_area = build_joint_init_masks(img_predictor, vol_man, seed, best_axis, box, args, rng)
+            if avg_joint_area > args.max_joint_avg_area:
+                print(f"Skip seed {seed}: joint avg area {avg_joint_area:.1f} > {args.max_joint_avg_area}")
+                continue
 
             track_dim = [0, 1, 2][best_axis]
             start_idx = seed[track_dim]

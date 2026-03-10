@@ -15,7 +15,7 @@ from sam2.sam2_image_predictor import SAM2ImagePredictor
 
 from .data_manager import VolumeManager
 from .preprocessing import get_multi_axis_init_seg, get_seeds_from_init_seg, get_seg
-from .sam2_baseline.predict_utils import map_local_point, predict_from_point
+from .sam2_baseline.predict_utils import map_local_point
 from .sam2_baseline.tracking import vos_track_one_direction
 os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
@@ -41,6 +41,8 @@ def get_args():
     parser.add_argument("--need_transpose", default="False")
     parser.add_argument("--max_track_distance", type=int, default=2000)
     parser.add_argument("--recover_overlap_threshold", type=float, default=0.5)
+    parser.add_argument("--max_init_mask_area", type=int, default=12000,
+                        help="Skip seed when chosen init mask area is larger than this")
 
     # video predictor / io knobs
     parser.add_argument("--vos_offload_video_to_cpu", action="store_true",
@@ -51,6 +53,26 @@ def get_args():
     return parser.parse_args()
 
 
+def select_mask_with_constraints(masks, scores, max_area):
+    if len(masks) == 0:
+        return None, None
+    order = np.argsort(scores)[::-1]
+    best_mask, best_score, best_area = None, -1.0, None
+    for idx in order:
+        m = masks[idx].astype(np.uint8)
+        area = int(m.sum())
+        if area <= 0:
+            continue
+        if area > max_area:
+            continue
+        return m, float(scores[idx])
+    # fallback: return highest-score positive mask for logging/threshold skip
+    for idx in order:
+        m = masks[idx].astype(np.uint8)
+        area = int(m.sum())
+        if area > 0:
+            return m, float(scores[idx])
+    return None, None
 
 
 def run_segmentation():
@@ -174,7 +196,13 @@ def run_segmentation():
                 for axis in [0, 1, 2]:
                     img, box = crops[axis]
                     local_pt = map_local_point(seed, axis, box)
-                    mask = predict_from_point(img_predictor, img, local_pt)
+                    img_predictor.set_image(img)
+                    masks, scores, _ = img_predictor.predict(
+                        point_coords=np.array([local_pt]),
+                        point_labels=np.array([1]),
+                        multimask_output=True,
+                    )
+                    mask, _ = select_mask_with_constraints(masks, scores, args.max_init_mask_area)
                     if mask is None:
                         continue
                     area = int(mask.sum())
@@ -184,6 +212,9 @@ def run_segmentation():
                         best_mask = mask
 
             if best_axis == -1 or best_mask is None or best_mask.sum() == 0:
+                continue
+            if int(best_mask.sum()) > args.max_init_mask_area:
+                print(f"Skip seed {seed}: init mask area {int(best_mask.sum())} > {args.max_init_mask_area}")
                 continue
 
             # 2) build index lists (forward/backward) around the seed on the chosen axis
