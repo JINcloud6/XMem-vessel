@@ -37,8 +37,7 @@ class FrameQuality:
 
 @dataclass
 class LongTermSegment:
-    rep_frame_idx: int
-    rep_mask: np.ndarray
+    frame_items: List[FrameQuality]
     seg_quality: float
 
 
@@ -169,24 +168,33 @@ def promote_segment_to_longterm(
     if seg_q < args.longterm_quality_thr:
         return
 
-    # 代表帧：该段内质量最高帧
-    best = max(seg_frames, key=lambda x: x.quality)
-    rep = LongTermSegment(rep_frame_idx=best.frame_idx, rep_mask=best.mask, seg_quality=seg_q)
+    # 将整个高质量段写入 SAM2 cond memory（而非仅代表帧）
+    # 同一frame若重复出现，仅保留该段内质量最高的mask。
+    best_per_frame: Dict[int, FrameQuality] = {}
+    for item in seg_frames:
+        prev = best_per_frame.get(item.frame_idx, None)
+        if (prev is None) or (item.quality > prev.quality):
+            best_per_frame[item.frame_idx] = item
 
-    # 写入 SAM2 cond memory（不重载视频）
-    video_predictor.add_new_mask(
-        state,
-        frame_idx=rep.rep_frame_idx,
-        obj_id=1,
-        mask=rep.rep_mask.astype(bool),
-    )
-    longterm_bank.append(rep)
+    ordered_items = sorted(best_per_frame.values(), key=lambda x: x.frame_idx)
+    if len(ordered_items) == 0:
+        return
 
-    # 若超容量，删掉质量最低 long-term 段（并从 cond outputs 尝试移除）
+    for item in ordered_items:
+        video_predictor.add_new_mask(
+            state,
+            frame_idx=item.frame_idx,
+            obj_id=1,
+            mask=item.mask.astype(bool),
+        )
+    longterm_bank.append(LongTermSegment(frame_items=ordered_items, seg_quality=seg_q))
+
+    # 若超容量，删掉质量最低 long-term 段（并从 cond outputs 尝试移除整段）
     while len(longterm_bank) > args.max_longterm_segments:
         worst_idx = int(np.argmin([x.seg_quality for x in longterm_bank]))
         worst = longterm_bank.pop(worst_idx)
-        remove_longterm_rep_from_cond_outputs(state, worst.rep_frame_idx)
+        for item in worst.frame_items:
+            remove_longterm_rep_from_cond_outputs(state, item.frame_idx)
 
 
 def build_frames_rgb(vol_man, axis, box, idx_list):
